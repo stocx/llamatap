@@ -128,10 +128,17 @@ def flatten(content):
 
 
 def normalise(req):
-    """One flat list of turns: {who, kind, text, tool}."""
+    """(preamble, turns) — turns being {who, kind, text, tool}.
+
+    Returns a PAIR on every path. The early guard used to return a bare list
+    while the end returned a 2-tuple, so `preamble, turns = normalise(req)`
+    raised ValueError for anything that was not a dict. A bodyless request —
+    any `GET /v1/models` — is recorded as `req: null`, and one of those made
+    the whole recording unopenable in the console.
+    """
     turns = []
     if not isinstance(req, dict):
-        return turns
+        return "", turns
 
     sys_text = []
     s = req.get("system")
@@ -289,25 +296,34 @@ FLAGS_CACHE = {}
 
 
 def props(model, upstream=None):
-    """Everything llama-server will tell us about the loaded model.
+    """Everything the server will tell us about the loaded model.
 
-    /upstream/<model>/props on llama-swap reaches the backend directly.
-    Cached per model; a failure is silent because the thread is still readable
-    without it.
+    Two routes, because both deployments are supported and documented:
+    llama-swap exposes each backend at /upstream/<model>/props, while a direct
+    llama-server — now the default upstream — serves /props and has no
+    /upstream route at all. Trying only the swap route meant a direct install
+    showed no model details whatsoever.
+
+    Only a SUCCESSFUL lookup is cached. Caching the failure meant one
+    unreachable moment hid the model details for the rest of the session.
     """
     if not model:
         return {}
     if model in PROPS_CACHE:
         return PROPS_CACHE[model]
-    base = upstream or os.environ.get("LLAMATAP_UPSTREAM", _UPSTREAM_DEFAULT)
-    try:
-        import urllib.request
-        with urllib.request.urlopen(f"{base}/upstream/{model}/props", timeout=6) as r:
-            d = json.loads(r.read())
-    except Exception:
-        d = {}
-    PROPS_CACHE[model] = d
-    return d
+    base = (upstream or os.environ.get("LLAMATAP_UPSTREAM",
+                                       _UPSTREAM_DEFAULT)).rstrip("/")
+    import urllib.request
+    for url in (f"{base}/upstream/{model}/props", f"{base}/props"):
+        try:
+            with urllib.request.urlopen(url, timeout=6) as r:
+                d = json.loads(r.read())
+            if isinstance(d, dict) and d:
+                PROPS_CACHE[model] = d
+                return d
+        except Exception:
+            continue
+    return {}
 
 
 def launch_flags(model):

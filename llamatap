@@ -75,7 +75,10 @@ set -- ${ARGS+"${ARGS[@]}"}
 
 export LLAMATAP_UPSTREAM="$UP"
 export LLAMATAP_STATE="$STATE"
+# Owner-only: recordings hold prompts, source and sometimes secrets, and a
+# conventional umask of 022 would make this 0755.
 mkdir -p "$STATE" 2>/dev/null || true
+chmod 700 "$STATE" 2>/dev/null || true
 export LLAMATAP_REC="${LLAMATAP_REC:-$STATE/llamatap-records.jsonl}"
 export LLAMATAP_LOG="${LLAMATAP_LOG:-$STATE/llamatap.log}"
 export LLAMATAP_INFLIGHT="${LLAMATAP_INFLIGHT:-$STATE/llamatap-inflight.json}"
@@ -96,7 +99,8 @@ usage: llamatap <command> [options]
   follow           simple scrolling version, no pinned panel. Use when piping.
   replay N         re-send exchange N, optionally to a different model
   log              tail the one-line-per-request summary log
-  clear            archive the recording and start fresh
+  clear            archive the recording, then start a fresh one
+  archive          archive the recording without clearing it
   config           print the resolved settings and where each came from
 
 where the model is
@@ -182,7 +186,28 @@ case "$cmd" in
   all)    exec "$B/llamatap-thread.py" --all "$@" ;;
   log)    exec tail -f "$LLAMATAP_LOG" ;;
   config|settings) show_config ;;
-  clear)  : > "$LLAMATAP_LOG"; : > "$LLAMATAP_REC"; echo "recording cleared" ;;
+  archive)
+    "$B/llamatap-archive.py" --runs "$LLAMATAP_RUNS" "$LLAMATAP_REC" "$LLAMATAP_LOG"
+    ;;
+  clear)
+    # Archive FIRST, and truncate only if that succeeded. This used to be a
+    # bare `: > file` with no archive at all, while this script's own help and
+    # the README both promised one — so following the documented workflow
+    # destroyed the only copy of a result.
+    if dest="$("$B/llamatap-archive.py" --runs "$LLAMATAP_RUNS" \
+                 "$LLAMATAP_REC" "$LLAMATAP_LOG")"; then
+      : > "$LLAMATAP_LOG"; : > "$LLAMATAP_REC"
+      if [ "$dest" = "nothing to archive" ]; then
+        echo "recording was already empty"
+      else
+        echo "archived to $dest"
+        echo "  read it with: llamatap read --file $dest/$(basename "$LLAMATAP_REC")"
+      fi
+    else
+      echo "NOT cleared — archiving failed, so the recording was left alone" >&2
+      exit 1
+    fi
+    ;;
   ""|-h|--help|help) usage ;;
   *) echo "unknown command: $cmd" >&2; echo >&2; usage >&2; exit 1 ;;
 esac

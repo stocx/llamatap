@@ -35,7 +35,9 @@ else about its behaviour changes.
 | `llamatap follow` | plain scrolling live view, for piping. Has its own `r`/`i`/`p`/`f` keys and `--raw` / `--no-icons` |
 | `llamatap replay N` | re-send exchange N, optionally to another model |
 | `llamatap log` | tail the one-line-per-request summary |
-| `llamatap clear` | archive and start fresh by hand |
+| `llamatap clear` | archive, then start fresh |
+| `llamatap archive` | archive without clearing |
+| `llamatap config` | resolved settings, and whether the server answers |
 
 Every one accepts `--file <path>` to open an archived session:
 
@@ -392,9 +394,36 @@ Change the base URL to `http://127.0.0.1:9293/v1`.
 | Claude Code | `ANTHROPIC_BASE_URL` |
 | codex | its config's base URL |
 
-Works for OpenAI-compatible, Anthropic and Responses-API shapes. The proxy's two
-body rewrites (`_hoist_system`, `_merge_developer`) are self-guarding and are
-no-ops on OpenAI-shaped requests; each logs a `[shim]` line when it fires.
+**What is supported, honestly.** Requests are understood in all three shapes —
+Chat Completions, Anthropic and Responses. **Responses** are currently parsed
+for Chat Completions only, including its SSE framing. That means a harness
+speaking the Responses API (codex) or the Anthropic messages API (Claude Code)
+is recorded in full and replays correctly, but its model turn renders as
+nothing in the reader until those response formats are implemented. This is not
+a remote-model issue: llama-server answers all three shapes locally, so the
+harness picks the shape.
+
+**The two body rewrites.** `_hoist_system` and `_merge_developer` exist because
+Qwen3.5's chat template raises "System message must be at the beginning." on a
+non-leading system message. Each logs a `[shim]` line, and the exchange's
+`meta.shims` names it.
+
+They are **lossless**, which they once were not:
+
+- On `/v1/messages`, a non-leading system message is hoisted into the
+  top-level `system` field — that is Anthropic's protocol.
+- On Chat Completions it is **merged into the leading system message**. It used
+  to be relocated to a top-level `system` field here too, which an
+  OpenAI-compatible server simply ignores — so the instruction was silently
+  deleted in transit. A tap that drops "always answer in French" is worse than
+  one that passes the template error through.
+- A string-valued `developer` item in a Responses request is merged rather
+  than dropped.
+
+**The recording always holds the original request**, not the rewritten one.
+Those were the same variable once, so llamatap reported its own edit as the
+harness's request — in a tool whose whole claim is seeing what the harness
+sent.
 
 **If a harness is pointed at the tap, the tap must be running** or it fails with
 a connection error. Revert with the backup beside the config, e.g.

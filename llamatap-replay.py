@@ -19,7 +19,14 @@ Streaming is forced OFF for a replay: a non-streamed response returns one JSON
 body carrying llama.cpp's `timings` block, which is what the comparison needs.
 The original request's own `stream` setting is left untouched in the record.
 """
-import argparse, json, os, sys, time, urllib.request, urllib.error
+import argparse, importlib.util as _ilu, json, os, sys, time
+import urllib.request, urllib.error
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_spec = _ilu.spec_from_file_location(
+    "llamatap_thread", os.path.join(_HERE, "llamatap-thread.py"))
+T = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(T)
 
 # Default locations. Nothing here may name a particular machine or a
 # particular person's home directory: this has to work for whoever clones it.
@@ -59,17 +66,53 @@ def load(path):
     return out
 
 
+def append_record(path, status, req, resp, meta, path_=None, **kw):
+    """Append one replay exchange to a recording.
+
+    No cap on `resp`. There used to be a `[:262144]` slice here — the same one
+    removed from the proxy, left behind in this file because nothing re-checked
+    it. It cut the JSON mid-document, so a long generated file became
+    unparsable and later readers lost the entire answer rather than its tail.
+    """
+    dest = kw.get("path") or path_ or REC
+    line = json.dumps({"t": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                       "path": path, "status": status, "req": req,
+                       "meta": meta, "resp": resp}) + "\n"
+    newfile = not os.path.exists(dest)
+    with open(dest, "a") as f:
+        f.write(line)
+    if newfile:
+        try:
+            os.chmod(dest, 0o600)
+        except OSError:
+            pass
+
+
 def reply_of(resp_text):
-    """(text, reasoning, [tool call names], finish_reason) from a response."""
-    try:
-        d = json.loads(resp_text)
-    except Exception:
-        return "", "", [], None
-    ch = (d.get("choices") or [{}])[0]
-    m = ch.get("message") or {}
-    calls = [(tc.get("function") or {}).get("name") for tc in (m.get("tool_calls") or [])]
-    return (m.get("content") or "", m.get("reasoning_content") or "",
-            [c for c in calls if c], ch.get("finish_reason"))
+    """(text, reasoning, [tool call names], finish_reason) from a response.
+
+    Delegates to the reader's parser rather than keeping a second one. This
+    was `json.loads` only, so every SSE-framed original — which is what any
+    streaming harness produces, 85 of 85 real records in one sample — showed
+    as an empty response. `replay --diff` was therefore comparing against a
+    blank. Two parsers for one format is how they drifted apart; now there is
+    one.
+    """
+    turns = T.from_response(resp_text)
+    text = "\n".join(t.get("text") or "" for t in turns
+                      if t.get("who") == "model" and t.get("kind") == "")
+    reasoning = "\n".join(t.get("text") or "" for t in turns
+                          if t.get("kind") == "thinking")
+    calls = [t.get("tool") for t in turns
+             if t.get("kind") == "tool call" and t.get("tool")]
+    finish = next((t.get("finish") for t in turns if t.get("finish")), None)
+    if finish is None:
+        try:
+            d = json.loads(resp_text)
+            finish = ((d.get("choices") or [{}])[0]).get("finish_reason")
+        except Exception:
+            finish = None
+    return text.strip(), reasoning.strip(), calls, finish
 
 
 def send(req_body, path, upstream):
@@ -176,14 +219,13 @@ def main():
             continue
         res = summarise(f"REPLAY    ({model})", resp, ms, w)
         out.append((model, res))
-        with open(a.file, "a") as f:
-            f.write(json.dumps({
-                "t": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                "path": rec.get("path"), "status": status, "req": body,
-                "meta": {"elapsed_ms": ms, "replay_of": a.n, "replay_model": model,
-                         "usage": (json.loads(resp).get("usage") if resp else None),
-                         "timings": (json.loads(resp).get("timings") if resp else None)},
-                "resp": resp[:262144]}) + "\n")
+        meta = {"elapsed_ms": ms, "replay_of": a.n, "replay_model": model}
+        try:
+            d = json.loads(resp) if resp else {}
+            meta["usage"], meta["timings"] = d.get("usage"), d.get("timings")
+        except Exception:
+            pass
+        append_record(rec.get("path"), status, body, resp, meta, path=a.file)
 
     if len(out) > 1:
         print(f"{C['hdr']}{' comparison ':=^{w}}{C['off']}")

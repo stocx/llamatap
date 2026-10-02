@@ -90,6 +90,14 @@ window, the sampling settings — come from llama.cpp and llama-swap endpoints
 (`/props`, `/running`) and are simply left out, labelled, when the server does
 not offer them.
 
+**Protocol coverage, stated plainly.** Requests are understood in all three
+shapes: Chat Completions, Anthropic (`/v1/messages`) and Responses
+(`/v1/responses`). **Responses are parsed for Chat Completions only**, SSE
+included. A harness speaking Responses (codex) or Anthropic (Claude Code) is
+recorded in full and replays correctly, but its model turn renders as nothing
+in the reader until those formats are implemented. The shape is the harness's
+choice, not the model's — a local llama-server answers all three.
+
 ## Use
 
 Two windows. In the first:
@@ -117,7 +125,8 @@ Then point your harness at `http://127.0.0.1:9293/v1` and work normally.
 | `llamatap follow` | plain scrolling live view, for piping |
 | `llamatap replay N` | re-send exchange N, optionally to another model |
 | `llamatap log` | tail the one-line-per-request summary |
-| `llamatap clear` | archive and start fresh |
+| `llamatap clear` | archive, then start fresh. Refuses rather than clearing if the archive fails |
+| `llamatap archive` | archive without clearing |
 | `llamatap config` | resolved settings, and whether the server answers |
 
 All of them take `--file <path>` to open an archived recording.
@@ -151,9 +160,31 @@ annotated with a claim the protocol does not support.
 
 ## Privacy
 
-Recordings contain your prompts, your file contents and your paths. They are
-gitignored, and `llamatap clear` and `serve` archive rather than delete. If you
-share a recording, read it first.
+Recordings contain your prompts, your file contents and your paths.
+
+- The state directory is created `0700`; recordings, logs and the in-flight
+  file are created `0600`, with the mode set at creation rather than by a
+  later `chmod`.
+- They are gitignored.
+- `clear` and `serve` **archive, never delete**, into a directory that cannot
+  collide with an existing one. If archiving fails, nothing is truncated.
+- The recording holds the request the harness sent, byte for byte. If a
+  compatibility shim rewrote the outgoing request, `meta.shims` says so.
+
+If you share a recording, read it first.
+
+## Tests
+
+Standard library only, no runner to install:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Every test runs in its own temporary directory against a mock upstream bound
+to an ephemeral port. Nothing touches a real recording, needs a key, or
+reaches the network. Streaming is asserted by ordering rather than elapsed
+time, so the suite does not get flakier on a loaded machine.
 
 ## Reference
 

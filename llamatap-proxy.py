@@ -48,7 +48,8 @@ _active_lock = threading.Lock()
 def _publish():
     try:
         tmp = INFLIGHT + ".tmp"
-        with open(tmp, "w") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(list(_active.values()), f)
         os.replace(tmp, INFLIGHT)      # atomic: a reader never sees half a file
     except Exception:
@@ -234,8 +235,21 @@ def summarise(path, body):
     return out
 
 
+def _private(path):
+    """Create-or-open for append with owner-only permissions.
+
+    Recordings and logs hold prompts, source code and sometimes secrets. With
+    a conventional umask of 022 these were created 0644, so on a machine where
+    the home directory is traversable any local user could read a session.
+    os.open with 0o600 sets the mode at creation, which chmod-after-open does
+    not — that leaves a window where the file exists and is readable.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    return os.fdopen(fd, "a")
+
+
 def log(msg):
-    with open(LOGFILE, "a") as f:
+    with _private(LOGFILE) as f:
         f.write(msg + "\n")
         f.flush()
 
@@ -264,7 +278,7 @@ def record(path, status, req_bytes, resp_bytes, meta=None):
            "resp": resp_bytes[:_cap].decode("utf8", "replace") if _cap
                    else resp_bytes.decode("utf8", "replace")}
     try:
-        with open(RECFILE, "a") as f:
+        with _private(RECFILE) as f:
             f.write(json.dumps(rec) + "\n")
             f.flush()
     except Exception as e:
@@ -274,13 +288,66 @@ def record(path, status, req_bytes, resp_bytes, meta=None):
 class Tap(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
+    def _read_request_body(self):
+        """The request body, however the client framed it.
+
+        Content-Length is the common case. A client using
+        `Transfer-Encoding: chunked` sends no Content-Length, and reading zero
+        bytes while forwarding that header left upstream waiting for a body
+        that never came — and the unread chunks sitting on this connection.
+        Returns None if the framing is broken, which the caller turns into a
+        400 rather than forwarding something inconsistent.
+        """
+        n = self.headers.get("Content-Length")
+        if n is not None:
+            try:
+                return self.rfile.read(int(n))
+            except (ValueError, OSError):
+                return None
+        if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+            out = bytearray()
+            try:
+                while True:
+                    line = self.rfile.readline(1024).strip()
+                    if not line:
+                        break
+                    size = int(line.split(b";")[0], 16)
+                    if size == 0:
+                        # consume trailers up to the blank line
+                        while self.rfile.readline(1024).strip():
+                            pass
+                        break
+                    out.extend(self.rfile.read(size))
+                    self.rfile.readline(8)      # the CRLF after each chunk
+            except (ValueError, OSError):
+                return None
+            return bytes(out)
+        return b""
+
     def _proxy(self, method):
-        n = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(n) if n else b""
+        # `sent` may be rewritten by a shim; `original` is what the harness
+        # actually put on the wire and is the ONLY thing that may be recorded.
+        # These used to be one variable, so llamatap reported its own edit as
+        # the harness's request — in a tool whose whole claim is "see what the
+        # harness sent".
+        original = self._read_request_body()
+        if original is None:
+            msg = b'{"error":{"message":"llamatap could not read the request body"}}'
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
+            return
+        self._shims = []
         url = UPSTREAM + self.path
+        # Transfer-Encoding goes too: the body is re-framed with an explicit
+        # Content-Length below, so passing the client's framing header on
+        # would describe the request wrongly.
         hdrs = {k: v for k, v in self.headers.items()
-                if k.lower() not in ("host", "content-length", "accept-encoding")}
-        body = self._hoist_system(body)
+                if k.lower() not in ("host", "content-length", "accept-encoding",
+                                     "transfer-encoding")}
+        body = self._hoist_system(original)
         body = self._merge_developer(body)
         if body:
             hdrs["Content-Length"] = str(len(body))
@@ -309,13 +376,37 @@ class Tap(http.server.BaseHTTPRequestHandler):
                     log("REQUEST (raw):\n" + body.decode("utf8", "replace")[:20000])
             log("RESPONSE:\n" + err.decode("utf8", "replace")[:4000])
             inflight_clear(key)
-            record(self.path, status, body, err,
-                   {"elapsed_ms": int((time.time() - t0) * 1000)})
+            record(self.path, status, original, err,
+                   {"elapsed_ms": int((time.time() - t0) * 1000),
+                    **({"shims": list(self._shims)} if self._shims else {})})
             self.send_response(status)
             self.send_header("Content-Type", rhdrs.get("Content-Type", "application/json"))
             self.send_header("Content-Length", str(len(err)))
             self.end_headers()
             self.wfile.write(err)
+            return
+        except Exception as e:
+            # URLError, socket timeout, DNS failure: the upstream is not
+            # there. This used to escape the handler entirely, so nothing was
+            # recorded and the in-flight entry leaked.
+            detail = f"{type(e).__name__}: {e}"
+            log(f"\n===== 502 {method} {self.path} ===== upstream unreachable: {detail}")
+            msg = json.dumps({"error": {"message": f"llamatap could not reach "
+                                                   f"{UPSTREAM}: {detail}",
+                                        "type": "upstream_unreachable"}}).encode()
+            inflight_clear(key)
+            record(self.path, 502, original, msg,
+                   {"elapsed_ms": int((time.time() - t0) * 1000),
+                    "error": detail,
+                    **({"shims": list(self._shims)} if self._shims else {})})
+            try:
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(msg)))
+                self.end_headers()
+                self.wfile.write(msg)
+            except Exception:
+                pass
             return
 
         log(f"\n----- {status} {method} {self.path} -----")
@@ -344,121 +435,168 @@ class Tap(http.server.BaseHTTPRequestHandler):
         _cap = int(os.environ.get("LLAMATAP_CAP", "0") or 0)
         HEAD_CAP = _cap if _cap else float("inf")
         TAIL_CAP = 131072
-        ntok, last_pub = 0, 0.0
-        # Decoded text so far, so a viewer can show the reply AS IT ARRIVES.
-        # Records are only written when an exchange completes, so without this
-        # the newest turn is invisible for as long as it takes to generate —
-        # twenty seconds of nothing on a long reasoning reply.
-        live_txt, live_think, sse_buf = "", "", ""
-        seen = bytearray()
-        tail = bytearray()
-        overflowed = False
-        while True:
-            chunk = resp.read(4096)
-            if not chunk:
-                break
-            if t_first is None:
-                t_first = time.time()
-                inflight_set(key, state="decoding", ttft=t_first - t0)
-            # One SSE object per token, so counting delta chunks is a close
-            # enough live token counter for a progress display.
-            ntok += chunk.count(b'"delta"')
-            sse_buf += chunk.decode("utf8", "replace")
-            lines = sse_buf.split("\n")
-            sse_buf = lines.pop()          # keep the partial last line
-            for ln in lines:
-                ln = ln.strip()
-                if not ln.startswith("data:"):
-                    continue
-                payload = ln[5:].strip()
-                if payload in ("", "[DONE]"):
-                    continue
-                try:
-                    d = json.loads(payload)
-                except Exception:
-                    continue
-                for ch2 in (d.get("choices") or []):
-                    dl = ch2.get("delta") or {}
-                    if dl.get("content"):
-                        live_txt += dl["content"]
-                    if dl.get("reasoning_content"):
-                        live_think += dl["reasoning_content"]
-            if time.time() - last_pub > 0.3:
-                last_pub = time.time()
-                inflight_set(key, tokens=ntok, state="decoding",
-                             text=live_txt[-1200:], thinking=live_think[-1200:])
-            if len(seen) < HEAD_CAP:
-                seen.extend(chunk)
-            else:
-                overflowed = True
-                tail.extend(chunk)
-                if len(tail) > TAIL_CAP:
-                    del tail[:len(tail) - TAIL_CAP]
-            self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
-            self.wfile.flush()
-        self.wfile.write(b"0\r\n\r\n")
-        if overflowed:
-            seen.extend(b"\n\n[... llamatap: middle of response omitted, "
-                        b"head and tail kept ...]\n\n")
-            seen.extend(tail)
-        t_end = time.time()
-        meta = {"elapsed_ms": int((t_end - t0) * 1000),
-                "ttft_ms": int(((t_first or t_end) - t0) * 1000)}
-        u = usage_from(bytes(seen))
-        if u:
-            pt = u.get("prompt_tokens") or u.get("input_tokens")
-            ct = u.get("completion_tokens") or u.get("output_tokens")
-            cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens")
-            line = f"  ACTUAL     prompt {pt} tok, completion {ct} tok"
-            if cached is not None and pt:
-                fresh = pt - cached
-                pct = (100 * cached // pt) if pt else 0
-                line += f"  |  cached {cached} ({pct}%), fresh prefill {fresh}"
-            # Decode rate over the generation phase only: total wall time minus
-            # the wait for the first byte, which is prefill. Reported as
-            # wall-clock from this proxy's view, not llama-server's internal
-            # timings, so it includes network — negligible on a LAN.
-            meta["usage"] = u
-            tm = timings_from(bytes(seen))
-            if tm:
-                meta["timings"] = tm
-            else:
-                # Fallback only. A non-streamed response arrives in one burst,
-                # so t_first == t_end and a decode rate cannot be derived —
-                # report overall throughput instead of a fictional one.
-                gen_s = (t_end - (t_first or t_end))
-                if ct and gen_s > 0.05:
-                    meta["decode_tps"] = round(ct / gen_s, 2)
-                elif ct:
-                    meta["overall_tps"] = round(ct / max(0.001, t_end - t0), 2)
-            log(line)
-            tm = meta.get("timings") or {}
-            if tm:
-                log(f"  TIMING     prefill {tm.get('prompt_n')} tok at "
-                    f"{tm.get('prompt_per_second', 0):.0f} tok/s, decode "
-                    f"{tm.get('predicted_n')} tok at "
-                    f"{tm.get('predicted_per_second', 0):.1f} tok/s")
-            else:
-                log(f"  TIMING     {meta['ttft_ms']} ms to first token, "
-                    f"{meta['elapsed_ms']} ms total")
-        inflight_clear(key)
-        record(self.path, status, body, bytes(seen), meta)
+        # Everything from here is wrapped so the exchange is ALWAYS written
+        # down and the in-flight entry ALWAYS cleared. Previously only
+        # HTTPError was handled: a client that walked away mid-stream, an
+        # upstream that dropped the connection, or a read timeout skipped
+        # both, so the exchange vanished and the console showed it running
+        # forever until the proxy was restarted.
+        meta = None
+        try:
+            ntok, last_pub = 0, 0.0
+            # Decoded text so far, so a viewer can show the reply AS IT ARRIVES.
+            # Records are only written when an exchange completes, so without this
+            # the newest turn is invisible for as long as it takes to generate —
+            # twenty seconds of nothing on a long reasoning reply.
+            live_txt, live_think, sse_buf = "", "", ""
+            seen = bytearray()
+            tail = bytearray()
+            overflowed = False
+            while True:
+                # read1, not read. BufferedReader.read(n) blocks until it
+                # has n bytes or hits EOF, so with small SSE events the proxy
+                # sat on them until 4096 bytes had piled up — a short reply
+                # reached the harness only once generation had finished, and
+                # time-to-first-token measured the buffer, not the model.
+                # read1 returns whatever has already arrived.
+                chunk = resp.read1(65536)
+                if not chunk:
+                    break
+                if t_first is None:
+                    t_first = time.time()
+                    inflight_set(key, state="decoding", ttft=t_first - t0)
+                # One SSE object per token, so counting delta chunks is a close
+                # enough live token counter for a progress display.
+                ntok += chunk.count(b'"delta"')
+                sse_buf += chunk.decode("utf8", "replace")
+                lines = sse_buf.split("\n")
+                sse_buf = lines.pop()          # keep the partial last line
+                for ln in lines:
+                    ln = ln.strip()
+                    if not ln.startswith("data:"):
+                        continue
+                    payload = ln[5:].strip()
+                    if payload in ("", "[DONE]"):
+                        continue
+                    try:
+                        d = json.loads(payload)
+                    except Exception:
+                        continue
+                    for ch2 in (d.get("choices") or []):
+                        dl = ch2.get("delta") or {}
+                        if dl.get("content"):
+                            live_txt += dl["content"]
+                        if dl.get("reasoning_content"):
+                            live_think += dl["reasoning_content"]
+                if time.time() - last_pub > 0.3:
+                    last_pub = time.time()
+                    inflight_set(key, tokens=ntok, state="decoding",
+                                 text=live_txt[-1200:], thinking=live_think[-1200:])
+                if len(seen) < HEAD_CAP:
+                    seen.extend(chunk)
+                else:
+                    overflowed = True
+                    tail.extend(chunk)
+                    if len(tail) > TAIL_CAP:
+                        del tail[:len(tail) - TAIL_CAP]
+                self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+            if overflowed:
+                seen.extend(b"\n\n[... llamatap: middle of response omitted, "
+                            b"head and tail kept ...]\n\n")
+                seen.extend(tail)
+            t_end = time.time()
+            meta = {"elapsed_ms": int((t_end - t0) * 1000),
+                    "ttft_ms": int(((t_first or t_end) - t0) * 1000)}
+            u = usage_from(bytes(seen))
+            if u:
+                pt = u.get("prompt_tokens") or u.get("input_tokens")
+                ct = u.get("completion_tokens") or u.get("output_tokens")
+                cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens")
+                line = f"  ACTUAL     prompt {pt} tok, completion {ct} tok"
+                if cached is not None and pt:
+                    fresh = pt - cached
+                    pct = (100 * cached // pt) if pt else 0
+                    line += f"  |  cached {cached} ({pct}%), fresh prefill {fresh}"
+                # Decode rate over the generation phase only: total wall time minus
+                # the wait for the first byte, which is prefill. Reported as
+                # wall-clock from this proxy's view, not llama-server's internal
+                # timings, so it includes network — negligible on a LAN.
+                meta["usage"] = u
+                tm = timings_from(bytes(seen))
+                if tm:
+                    meta["timings"] = tm
+                else:
+                    # Fallback only. A non-streamed response arrives in one burst,
+                    # so t_first == t_end and a decode rate cannot be derived —
+                    # report overall throughput instead of a fictional one.
+                    gen_s = (t_end - (t_first or t_end))
+                    if ct and gen_s > 0.05:
+                        meta["decode_tps"] = round(ct / gen_s, 2)
+                    elif ct:
+                        meta["overall_tps"] = round(ct / max(0.001, t_end - t0), 2)
+                log(line)
+                tm = meta.get("timings") or {}
+                if tm:
+                    log(f"  TIMING     prefill {tm.get('prompt_n')} tok at "
+                        f"{tm.get('prompt_per_second', 0):.0f} tok/s, decode "
+                        f"{tm.get('predicted_n')} tok at "
+                        f"{tm.get('predicted_per_second', 0):.1f} tok/s")
+                else:
+                    log(f"  TIMING     {meta['ttft_ms']} ms to first token, "
+                        f"{meta['elapsed_ms']} ms total")
+            inflight_clear(key)
+        except (BrokenPipeError, ConnectionResetError):
+            # The harness hung up. Normal — it cancelled, or the user hit
+            # escape. Keep what was captured.
+            log("  client disconnected mid-stream; recording what arrived")
+        except Exception as e:
+            log(f"  upstream stream failed: {type(e).__name__}: {e}")
+        finally:
+            inflight_clear(key)
+            if meta is None:
+                meta = {"elapsed_ms": int((time.time() - t0) * 1000),
+                        "incomplete": True}
+            if self._shims:
+                meta["shims"] = list(self._shims)
+            record(self.path, status, original, bytes(seen), meta)
+            try:
+                resp.close()
+            except Exception:
+                pass
 
 
     def _hoist_system(self, body):
-        """Move any non-leading system-role message into the top-level system.
+        """Make a non-leading system message acceptable without losing it.
 
-        Claude Code v2.1.277 emits {"role":"system","text":"Today's date is ..."}
-        as messages[1]. Qwen3.5's chat template raises "System message must be
-        at the beginning." The date is already duplicated in the top-level
-        system prompt, so hoisting it changes nothing the model sees in
-        substance. Logged on every rewrite so runs stay auditable.
+        Qwen3.5's chat template raises "System message must be at the
+        beginning.", so a harness that sends a system message mid-conversation
+        gets a 500. This smooths that over — but HOW matters, and it used to
+        get it wrong.
+
+        It moved the message into a top-level `system` field. That is
+        Anthropic's protocol; an OpenAI-compatible server ignores the field
+        entirely, so on a chat completion the instruction was silently deleted
+        in transit. A tap that drops "always answer in French" is worse than
+        one that passes the error through.
+
+        So:
+          * /v1/messages (Anthropic) -> hoist into top-level `system`, which is
+            where that protocol carries it.
+          * anything else (Chat Completions) -> MERGE the text into the leading
+            system message, creating one if absent. Every word still reaches
+            the model, in order, in the one place the server reads.
+
+        Either way the ORIGINAL body is what gets recorded; see _proxy.
         """
         if not body:
             return body
         try:
             d = json.loads(body)
         except Exception:
+            return body
+        if not isinstance(d, dict):
             return body
         msgs = d.get("messages")
         if not isinstance(msgs, list):
@@ -471,19 +609,51 @@ class Tap(http.server.BaseHTTPRequestHandler):
                 kept.append(m)
         if not moved:
             return body
-        sys_field = d.get("system")
-        blocks = []
-        for m in moved:
+
+        def blocks_of(m):
             c = m.get("content")
-            blocks.extend(c if isinstance(c, list) else [{"type": "text", "text": str(c)}])
-        if isinstance(sys_field, list):
-            d["system"] = sys_field + blocks
-        elif isinstance(sys_field, str):
-            d["system"] = [{"type": "text", "text": sys_field}] + blocks
+            return c if isinstance(c, list) else [{"type": "text",
+                                                   "text": "" if c is None else str(c)}]
+
+        def text_of(m):
+            c = m.get("content")
+            if isinstance(c, str):
+                return c
+            if isinstance(c, list):
+                return "\n".join(b.get("text") or "" for b in c
+                                  if isinstance(b, dict))
+            return "" if c is None else str(c)
+
+        anthropic = self.path.rstrip("/").endswith("/messages")
+        if anthropic:
+            sys_field = d.get("system")
+            blocks = [b for m in moved for b in blocks_of(m)]
+            if isinstance(sys_field, list):
+                d["system"] = sys_field + blocks
+            elif isinstance(sys_field, str):
+                d["system"] = [{"type": "text", "text": sys_field}] + blocks
+            else:
+                d["system"] = blocks
+            d["messages"] = kept
+            where = "top-level system"
         else:
-            d["system"] = blocks
-        d["messages"] = kept
-        log(f"[shim] hoisted {len(moved)} system-role message(s) out of messages")
+            extra = "\n\n".join(t for t in (text_of(m) for m in moved) if t)
+            if kept and isinstance(kept[0], dict) and kept[0].get("role") == "system":
+                head = dict(kept[0])
+                c = head.get("content")
+                if isinstance(c, list):
+                    head["content"] = c + [{"type": "text", "text": extra}]
+                else:
+                    head["content"] = ((c or "") + "\n\n" + extra).strip()
+                kept = [head] + kept[1:]
+            else:
+                kept = [{"role": "system", "content": extra}] + kept
+            d["messages"] = kept
+            where = "the leading system message"
+        self._shims = getattr(self, "_shims", [])
+        self._shims.append("hoist_system")
+        log(f"[shim] merged {len(moved)} non-leading system message(s) into "
+            f"{where}; the recording keeps the original request")
         return json.dumps(d).encode()
 
 
@@ -503,16 +673,26 @@ class Tap(http.server.BaseHTTPRequestHandler):
             d = json.loads(body)
         except Exception:
             return body
+        if not isinstance(d, dict):
+            return body
         items = d.get("input")
         if not isinstance(items, list):
             return body
         extra, kept = [], []
         for it in items:
             if isinstance(it, dict) and it.get("role") in ("developer", "system"):
-                for c in it.get("content") or []:
-                    t = c.get("text") if isinstance(c, dict) else None
-                    if t:
-                        extra.append(t)
+                c = it.get("content")
+                # A plain string is a valid content form. Iterating it gave
+                # one character at a time, extracted nothing, and the item was
+                # dropped anyway — so the instruction was deleted outright.
+                if isinstance(c, str):
+                    if c:
+                        extra.append(c)
+                else:
+                    for b in c or []:
+                        t = b.get("text") if isinstance(b, dict) else None
+                        if t:
+                            extra.append(t)
             else:
                 kept.append(it)
         if not extra:
@@ -520,6 +700,8 @@ class Tap(http.server.BaseHTTPRequestHandler):
         instr = d.get("instructions") or ""
         d["instructions"] = (instr + "\n\n" + "\n\n".join(extra)).strip()
         d["input"] = kept
+        self._shims = getattr(self, "_shims", [])
+        self._shims.append("merge_developer")
         log(f"[shim] merged {len(extra)} developer block(s) into instructions")
         return json.dumps(d).encode()
 
@@ -596,15 +778,21 @@ if __name__ == "__main__":
     # Nothing is deleted: the old one is archived and the path is printed.
     if "--keep" not in sys.argv and not os.environ.get("LLAMATAP_KEEP"):
         try:
-            have = [f for f in (RECFILE, LOGFILE)
-                    if os.path.exists(f) and os.path.getsize(f) > 0]
-            if have:
-                stamp = time.strftime("%m%d-%H%M")
-                dest = os.path.join(os.path.dirname(RECFILE), "runs",
-                                    f"llamatap-{stamp}")
-                os.makedirs(dest, exist_ok=True)
-                for f in have:
-                    os.replace(f, os.path.join(dest, os.path.basename(f)))
+            # Shared with the console and the dispatcher, so all three
+            # cannot disagree about what archiving means. Minute-resolution
+            # stamps plus exist_ok=True used to let two starts inside one
+            # minute overwrite each other's recording.
+            import importlib.util as _a
+            _s = _a.spec_from_file_location(
+                "llamatap_archive",
+                os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "llamatap-archive.py"))
+            _arch = _a.module_from_spec(_s)
+            _s.loader.exec_module(_arch)
+            runs = os.environ.get("LLAMATAP_RUNS") or os.path.join(
+                os.path.dirname(RECFILE), "runs")
+            dest = _arch.archive([RECFILE, LOGFILE], runs)
+            if dest:
                 print(f"archived the previous recording to {dest}", flush=True)
                 print(f"  read it with: llamatap read --file "
                       f"{os.path.join(dest, os.path.basename(RECFILE))}", flush=True)

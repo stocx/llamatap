@@ -34,6 +34,56 @@ def _load(name, path):
 
 T = _load("llamatap_thread", "llamatap-thread.py")
 CAT = _load("llamatap_catalog", "llamatap-catalog.py")
+# One archive implementation, shared with `serve` and the dispatcher. There
+# used to be three, which is how they came to disagree about whether `clear`
+# archives at all.
+ARCHIVE = _load("llamatap_archive", "llamatap-archive.py")
+
+
+def ask_payload(rec, text):
+    """The request body for `/ask`: the captured exchange, continued.
+
+    The captured `req.messages` end BEFORE the assistant reply, which lives in
+    `rec.resp`. Appending the new user message straight onto them skipped that
+    reply, so "explain your last answer" could not see the answer printed
+    immediately above it, and each repeated /ask dropped another one.
+
+    Reconstructs the completed exchange first. A captured turn that ended in a
+    tool call has no resolved result — nothing here can run a tool — so the
+    model sees the call it made and no output, which is the honest picture.
+    """
+    req = json.loads(json.dumps(rec.get("req") or {}))   # never edit the record
+    msgs = list(req.get("messages") or [])
+    turns = T.from_response(rec.get("resp"))
+    said = "\n".join(t.get("text") or "" for t in turns
+                      if t.get("who") == "model" and t.get("kind") == "")
+    calls = [t for t in turns if t.get("kind") == "tool call"]
+    if said.strip() or calls:
+        assistant = {"role": "assistant", "content": said.strip()}
+        if calls:
+            assistant["tool_calls"] = [
+                {"id": f"call_{i}", "type": "function",
+                 "function": {"name": c.get("tool") or "",
+                              "arguments": c.get("text") or "{}"}}
+                for i, c in enumerate(calls)]
+        msgs.append(assistant)
+    msgs.append({"role": "user", "content": text})
+    req["messages"] = msgs
+    req["stream"] = False
+    return req
+
+
+def replay_cmd(args, path):
+    """The replay command line, carrying the recording the console has open.
+
+    Without the `--file`, `/replay N` in a console opened on an archive read
+    and appended to the LIVE recording instead — and so could send a
+    completely different exchange to the model.
+    """
+    cmd = [os.path.join(HERE, "llamatap-replay.py")] + list(args)
+    if path and "--file" not in cmd:
+        cmd += ["--file", path]
+    return cmd
 
 
 def cat_markers():
@@ -190,11 +240,27 @@ def ansi_lines(text):
 _TAIL = {}
 
 
-def _head_of(path, n=64):
-    """The first bytes, as a cheap identity check for the file at this path."""
+_BOUNDARY = 256
+
+
+def _boundary_sig(path, consumed):
+    """The bytes immediately before `consumed`, as proof the file still
+    contains what we already read.
+
+    A 64-byte check on the FILE HEAD was not enough, and a test caught it
+    splicing two recordings together: every record begins with a timestamp, so
+    two sessions starting in the same second produce byte-identical openings.
+    The question that actually matters is not "does this file start the same
+    way" but "is this file still a superset of what I consumed" — so look at
+    the boundary, where a rewritten file differs.
+    """
+    if consumed <= 0:
+        return b""
+    start = max(0, consumed - _BOUNDARY)
     try:
         with open(path, "rb") as f:
-            return f.read(n)
+            f.seek(start)
+            return f.read(consumed - start)
     except OSError:
         return b""
 
@@ -211,16 +277,16 @@ def load_records(path, incremental=True):
     except OSError:
         _TAIL.pop(path, None)
         return []
-    seen, recs, head = (_TAIL.get(path, (0, None, b"")) if incremental
-                        else (0, None, b""))
-    if recs is None or size < seen or head != _head_of(path):
-        # Shrunk, or the first bytes changed: a different file at the same
-        # path. `serve` archives the recording and starts a fresh one, so this
-        # happens in normal use and must not splice two recordings together.
+    seen, recs, sig = (_TAIL.get(path, (0, None, b"")) if incremental
+                       else (0, None, b""))
+    if recs is None or size < seen or sig != _boundary_sig(path, seen):
+        # Shrunk, or the content at the boundary changed: a different file at
+        # the same path. `serve` archives the recording and starts a fresh
+        # one, so this happens in normal use and must never splice two
+        # recordings into one conversation.
         seen, recs = 0, []
     if size == seen:
         return list(recs)
-    head = _head_of(path)
     out = list(recs)
     try:
         # Binary, because the offset is a byte count: seeking a text stream to
@@ -245,7 +311,7 @@ def load_records(path, incremental=True):
     except FileNotFoundError:
         _TAIL.pop(path, None)
         return []
-    _TAIL[path] = (consumed, out, head)
+    _TAIL[path] = (consumed, out, _boundary_sig(path, consumed))
     return list(out)
 
 
@@ -1500,13 +1566,9 @@ class Console:
         rec = self._dash_rec or (self.recs[-1] if self.recs else None)
         if rec is None:
             return self.note("nothing captured yet — run one turn through the harness first")
-        req = dict(rec.get("req") or {})
-        msgs = list(req.get("messages") or [])
-        if not msgs:
+        if not (rec.get("req") or {}).get("messages"):
             return self.note("the captured request has no messages to continue")
-        msgs.append({"role": "user", "content": text})
-        req["messages"] = msgs
-        req["stream"] = False
+        req = ask_payload(rec, text)
         self.busy = f"asking… {text[:40]}"
 
         def work():
@@ -1542,32 +1604,40 @@ class Console:
         threading.Thread(target=work, daemon=True).start()
 
     def cmd_clear(self):
-        """Archive, then truncate. Never a plain delete: a recording is the only
-        copy of a result, and `clear` has already been a near-miss once."""
-        stamp = time.strftime("%m%d-%H%M")
-        dest = os.path.join(RUNS, f"llamatap-{stamp}")
+        """Archive, then truncate. Never a plain delete: a recording is the
+        only copy of a result.
+
+        Delegates to llamatap-archive, which picks a destination that cannot
+        collide. The stamp here was minute-resolution with
+        `makedirs(exist_ok=True)`, so clearing twice inside a minute silently
+        overwrote the first archive.
+        """
         try:
-            os.makedirs(dest, exist_ok=True)
-            moved = []
-            for f in (self.path, LOG):
-                if os.path.exists(f) and os.path.getsize(f) > 0:
-                    os.replace(f, os.path.join(dest, os.path.basename(f)))
-                    moved.append(os.path.basename(f))
-            self.recs, self.extra, self.top, self.follow = [], [], 0, True
-            if moved:
-                self.note(f"archived to runs/llamatap-{stamp}/  "
-                          f"(llamatap read --file runs/llamatap-{stamp}/llamatap-records.jsonl)",
-                          secs=12)
-            else:
-                self.note("nothing to archive; recording was already empty")
-            self.rebuild()
+            dest = ARCHIVE.archive([self.path, LOG], RUNS)
         except Exception as e:
-            self.note(f"clear failed: {e}")
+            # Nothing was truncated, so say so plainly.
+            return self.note(f"NOT cleared — archiving failed: {e}")
+        # Only now is it safe to start fresh.
+        try:
+            for f in (self.path, LOG):
+                if os.path.exists(f):
+                    open(f, "w").close()
+        except Exception as e:
+            return self.note(f"archived to {dest}, but could not truncate: {e}")
+        self.recs, self.extra, self.top, self.follow = [], [], 0, True
+        if dest:
+            name = os.path.basename(dest)
+            self.note(f"archived to runs/{name}/  "
+                      f"(llamatap read --file {dest}/"
+                      f"{os.path.basename(self.path)})", secs=12)
+        else:
+            self.note("nothing to archive; recording was already empty")
+        self.rebuild()
 
     def cmd_replay(self, args):
         if not args:
             return self.note("usage: /replay N [--model NAME] [--diff]")
-        cmd = [os.path.join(HERE, "llamatap-replay.py")] + args
+        cmd = replay_cmd(args, self.path)
         self.busy = f"replaying {' '.join(args)}…"
 
         def work():
