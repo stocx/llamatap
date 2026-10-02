@@ -175,10 +175,11 @@ row and always shown; the two no longer share a toggle.
 
 ### Keys
 
-    ↑ ↓              scroll one line
-    PgUp PgDn Space  scroll one screen
-    Home             jump to the start of the conversation
-    End / g          jump to the newest message and follow new ones
+    j k  or  ↑ ↓     scroll one line
+    ctrl-d / ctrl-u  scroll half a screen
+    ctrl-f / ctrl-b  scroll a screen (also Space, PgDn, PgUp)
+    gg               jump to the start of the conversation
+    G                jump to the newest message and follow new ones
     click a green +  expand that node in place; click again to collapse
     x                number the expandable nodes, then press 1-9 to toggle
     o / O            expand all in this exchange / collapse everything
@@ -192,6 +193,10 @@ row and always shown; the two no longer share a toggle.
 
 **Escape does not quit.** Arrow keys and mouse reports are escape sequences, so
 a dropped byte looks like a bare Esc — quitting on that was wrong. Esc cancels.
+
+**The motions are vim's, not the terminal's.** `Home` and `End` still work, but
+on a laptop they need `Fn`, which is the wrong thing to press while reading. A
+lone `g` arms the `gg` prefix and says so; any other key cancels it.
 
 ### The command palette
 

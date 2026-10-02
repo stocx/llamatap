@@ -89,10 +89,11 @@ HELP = [
     # Keys only. The slash commands come from COMMANDS, which /help prints
     # above these, so listing them here too went stale the moment a command
     # was renamed — this list used to advertise /icons, removed weeks ago.
-    "↑ ↓              scroll one line",
-    "PgUp PgDn Space  scroll one screen",
-    "Home             jump to the start of the conversation",
-    "End / g          jump to the newest message and follow new ones",
+    "j k  or  ↑ ↓     scroll one line",
+    "ctrl-d / ctrl-u  scroll half a screen",
+    "ctrl-f / ctrl-b  scroll a screen (also Space, PgDn, PgUp)",
+    "gg               jump to the start of the conversation",
+    "G                jump to the newest message and follow new ones",
     "click a green +  expand that node in place; click again to collapse",
     "x                number the expandable nodes, then press 1-9 to toggle",
     "o / O            expand all in this exchange / collapse everything",
@@ -1128,8 +1129,12 @@ class Console:
             return
         else:
             curses.curs_set(0)
-            hint = self.msg or (" click a green + to expand  ·  x list  ·  o/O all  ·  "
-                                "r raw json  ·  p system prompt  ·  ↑↓ scroll  ·  / command  ·  y copy  ·  q quit ")
+            # Ordered by what someone stuck needs first: this line is clipped
+            # at the terminal width, and `q quit` used to sit at the very end
+            # where it was the first thing lost on an 80-column window.
+            hint = self.msg or (" / commands  ·  q quit  ·  jk gg G scroll  ·  "
+                                "click a green + to expand  ·  x list  ·  o/O all  ·  "
+                                "r raw json  ·  p system prompt  ·  y copy ")
             try:
                 scr.addnstr(H - 1, 0, hint.ljust(W - 1), W - 1, curses.color_pair(6))
             except curses.error:
@@ -1569,6 +1574,8 @@ class Console:
 
                 self.msg = ""
                 vh = self.view_h()
+                if ch != ord("g"):
+                    self._g_pending = False
                 if ch == ord("/"):
                     self.cmd = ""
                 elif ch == 27:
@@ -1581,17 +1588,35 @@ class Console:
                     self.msg_until = time.time() + 3
                 elif ch == ord("q"):
                     return
-                elif ch == curses.KEY_UP:
+                elif ch in (curses.KEY_UP, ord("k")):
                     self.top = max(0, self.top - 1); self.follow = False
-                elif ch == curses.KEY_DOWN:
+                elif ch in (curses.KEY_DOWN, ord("j")):
                     self.top = min(max(0, len(self.lines) - vh), self.top + 1)
-                elif ch == curses.KEY_PPAGE:
+                elif ch in (curses.KEY_PPAGE, 2):          # ctrl-b
                     self.top = max(0, self.top - vh); self.follow = False
-                elif ch in (curses.KEY_NPAGE, ord(" ")):
+                elif ch in (curses.KEY_NPAGE, ord(" "), 6):   # ctrl-f
                     self.top = min(max(0, len(self.lines) - vh), self.top + vh)
-                elif ch == curses.KEY_HOME:
+                elif ch == 21:                             # ctrl-u, half page
+                    self.top = max(0, self.top - vh // 2); self.follow = False
+                elif ch == 4:                              # ctrl-d, half page
+                    self.top = min(max(0, len(self.lines) - vh),
+                                   self.top + vh // 2)
+                elif ch == ord("g"):
+                    # vim's gg. Home needs Fn on a laptop, which is the wrong
+                    # key for something you press while reading. A bare g waits
+                    # for the second one; any other key cancels the prefix and
+                    # is handled normally on the next pass.
+                    if getattr(self, "_g_pending", False):
+                        self._g_pending = False
+                        self.top = 0; self.follow = False
+                    else:
+                        self._g_pending = True
+                        self.msg = " g again for the top "
+                        self.msg_until = time.time() + 2
+                        continue
+                elif ch in (curses.KEY_HOME,):
                     self.top = 0; self.follow = False
-                elif ch in (curses.KEY_END, ord("g")):
+                elif ch in (curses.KEY_END, ord("G")):
                     self.follow = True; self.to_bottom()
                 elif ch == ord("r"):
                     self.run_cmd("raw")

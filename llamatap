@@ -106,8 +106,9 @@ where the model is
                           to set it once (see 'llamatap config')
   default: $DEF_UPSTREAM
 
-console keys
-  up/down PgUp PgDn Space Home End/g   scroll
+console keys (vim motions; arrows and PgUp/PgDn also work)
+  j k  scroll a line     ctrl-d ctrl-u  half screen    ctrl-f ctrl-b  screen
+  gg   top               G              newest, and follow new ones
   click a green +   expand that node        x   number the nodes, 1-9 toggle
   o / O             expand / collapse all   r   tool args: raw JSON vs readable
   p  system prompt  f  launch settings      y   copy buffer    /  commands
