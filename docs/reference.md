@@ -241,8 +241,13 @@ A shown repeat is a collapsed one-liner that still carries its tokens and
 seconds, so you can tell whether it mattered.
 
 Scale, on a 25-exchange assembly task: 63 messages hidden, 654 shown, 591 of
-them repeats, forming 24 consecutive runs of 25, 28, 29, 31 … 48. That
-staircase *is* the stateless-resend cost, one step per turn.
+them repeats, forming 24 consecutive runs of 25, 28, 29, 31 … 48 — one step per
+turn.
+
+**A repeat is not the harness misbehaving.** The API is stateless, so the whole
+history has to go out every time or the model has no context. What the staircase
+shows is how much *context window* each turn consumes, not wasted compute —
+with the prefix cache working, re-sent tokens are nearly free to process.
 
 ---
 
@@ -484,10 +489,21 @@ competes with the content.
 - It **can never hit the prefix cache**, because it carries its own system
   prompt and reuse requires matching from token 0.
 
-**The cost of being stateless**
+**The cost of being stateless** — and what is actually the harness's fault
 
-- One assembly task: **25 requests, 591 re-sent messages.** One cold prefill,
-  then six near-free turns (`15,407 reused / 20 new`).
+- One assembly task: **25 requests carrying 591 re-sent messages.** One cold
+  prefill, then six near-free turns (`15,407 reused / 20 new`).
+- **Resending is mandatory, not a harness choice.** No session exists on the
+  server, so the conversation, the system prompt and every tool schema ride
+  along on every request.
+- **What the harness chooses is the size** of that mandatory payload, and
+  **whether the prefix stays stable.** Caching matches only from token 0, so a
+  harness that reorders tools, injects a timestamp or varies its system prompt
+  between turns drops reuse to zero and pays full prefill every turn. That is a
+  real defect and it is invisible without a tap.
+- Therefore `Cache Reuse 100%` is a **pass**, not a cost. The bill that does
+  come due is **context window**: re-sent tokens count toward `n_ctx` whether
+  cached or not, so preamble size sets how fast you hit the wall.
 
 **Harness behaviour**
 
