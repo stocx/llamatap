@@ -18,20 +18,41 @@ Printing every record would repeat the history once per turn.
 import argparse, json, os, re, select, shutil, subprocess, sys, termios, time, tty, unicodedata
 
 
+_CELLS = {}
+
+
 def dwidth(text):
-    """Display width in cells. Emoji are double-width but len() counts them as
-    one, so rules padded with len() run a cell long for each emoji."""
+    """Display width in terminal cells.
+
+    Emoji and CJK occupy TWO cells but count as one character in len(), so
+    using len() to track column positions makes every span after an emoji land
+    one cell early — the terminal then overwrites it. That is why `🎓skill`
+    rendered as `🎓sill` and why the dashboard border came out ragged.
+
+    Per-character widths are memoised. This is called on every span of every
+    line on every rebuild — 59,000 calls and 716,000 unicodedata lookups on a
+    14 MB recording, which was 660 ms of a 500 ms frame budget. The set of
+    distinct characters in a terminal is tiny and never changes.
+    """
+    if text.isascii():
+        # The overwhelmingly common case. Every ASCII character is one cell,
+        # so len() is exact — and this skips 900,000 dict lookups per rebuild.
+        return len(text)
     w = 0
     for ch in text:
-        o = ord(ch)
-        if unicodedata.combining(ch):
-            continue
-        if unicodedata.east_asian_width(ch) in ("W", "F") or \
-           0x1F300 <= o <= 0x1FAFF or 0x2600 <= o <= 0x27BF or \
-           0x1F000 <= o <= 0x1F2FF:
-            w += 2
-        else:
-            w += 1
+        cw = _CELLS.get(ch)
+        if cw is None:
+            o = ord(ch)
+            if unicodedata.combining(ch):
+                cw = 0
+            elif unicodedata.east_asian_width(ch) in ("W", "F") or \
+                    0x1F300 <= o <= 0x1FAFF or 0x2600 <= o <= 0x27BF or \
+                    0x1F000 <= o <= 0x1F2FF:
+                cw = 2
+            else:
+                cw = 1
+            _CELLS[ch] = cw
+        w += cw
     return w
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -155,8 +176,33 @@ def normalise(req):
     return preamble, turns
 
 
+# Parsed responses, keyed by the raw body. A record's response never changes
+# once written, but the console reloads the whole recording twice a second and
+# re-parsed every one: 20,000 json.loads calls per rebuild on a 14 MB
+# recording. The key holds a reference to a string that is already in memory,
+# so this costs dict overhead and nothing else.
+_RESP_CACHE = {}
+_RESP_CACHE_MAX = 512
+
+
 def from_response(resp):
     """The assistant turn that came back. Handles plain JSON and SSE."""
+    if not resp:
+        return []
+    hit = _RESP_CACHE.get(resp)
+    if hit is not None:
+        return hit
+    out = _from_response_uncached(resp)
+    if len(_RESP_CACHE) >= _RESP_CACHE_MAX:
+        # Oldest first; a long session's recording grows without bound and
+        # this must not grow with it.
+        for k in list(_RESP_CACHE)[:_RESP_CACHE_MAX // 4]:
+            del _RESP_CACHE[k]
+    _RESP_CACHE[resp] = out
+    return out
+
+
+def _from_response_uncached(resp):
     if not resp:
         return []
     out, text, calls = [], "", []

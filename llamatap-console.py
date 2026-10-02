@@ -63,6 +63,9 @@ RUNS = os.environ.get("LLAMATAP_RUNS") or os.path.join(_STATE, "runs")
 ANSI = re.compile(r"\033\[([0-9;]*)m")
 
 
+_CELLS = {}
+
+
 def dwidth(text):
     """Display width in terminal cells.
 
@@ -70,18 +73,31 @@ def dwidth(text):
     using len() to track column positions makes every span after an emoji land
     one cell early — the terminal then overwrites it. That is why `🎓skill`
     rendered as `🎓sill` and why the dashboard border came out ragged.
+
+    Per-character widths are memoised. This is called on every span of every
+    line on every rebuild — 59,000 calls and 716,000 unicodedata lookups on a
+    14 MB recording, which was 660 ms of a 500 ms frame budget. The set of
+    distinct characters in a terminal is tiny and never changes.
     """
+    if text.isascii():
+        # The overwhelmingly common case. Every ASCII character is one cell,
+        # so len() is exact — and this skips 900,000 dict lookups per rebuild.
+        return len(text)
     w = 0
     for ch in text:
-        o = ord(ch)
-        if unicodedata.combining(ch):
-            continue
-        if unicodedata.east_asian_width(ch) in ("W", "F") or \
-           0x1F300 <= o <= 0x1FAFF or 0x2600 <= o <= 0x27BF or \
-           0x1F000 <= o <= 0x1F2FF:
-            w += 2
-        else:
-            w += 1
+        cw = _CELLS.get(ch)
+        if cw is None:
+            o = ord(ch)
+            if unicodedata.combining(ch):
+                cw = 0
+            elif unicodedata.east_asian_width(ch) in ("W", "F") or \
+                    0x1F300 <= o <= 0x1FAFF or 0x2600 <= o <= 0x27BF or \
+                    0x1F000 <= o <= 0x1F2FF:
+                cw = 2
+            else:
+                cw = 1
+            _CELLS[ch] = cw
+        w += cw
     return w
 PAIRS = {31: 1, 32: 2, 33: 3, 34: 4, 35: 5, 36: 6, 37: 7, 90: 8, 94: 9}
 
@@ -166,20 +182,71 @@ def ansi_lines(text):
     return out
 
 
-def load_records(path):
-    out = []
+# Incremental tail state, per path: (size_already_read, records_so_far).
+# The recording is append-only, so re-reading and re-parsing all of it twice a
+# second was pure waste — 91 ms per poll on a 14 MB recording, on top of the
+# rebuild, which together saturated the event loop and made the live view look
+# frozen while opencode was working.
+_TAIL = {}
+
+
+def _head_of(path, n=64):
+    """The first bytes, as a cheap identity check for the file at this path."""
     try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if line:
+        with open(path, "rb") as f:
+            return f.read(n)
+    except OSError:
+        return b""
+
+
+def load_records(path, incremental=True):
+    """Every record in the recording, re-reading only what was appended.
+
+    Falls back to a full read whenever the file is not a pure append of what
+    was seen before — a new recording after `serve` archived the old one, or a
+    `--file` switch. Shrinking or a changed prefix both mean "different file".
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        _TAIL.pop(path, None)
+        return []
+    seen, recs, head = (_TAIL.get(path, (0, None, b"")) if incremental
+                        else (0, None, b""))
+    if recs is None or size < seen or head != _head_of(path):
+        # Shrunk, or the first bytes changed: a different file at the same
+        # path. `serve` archives the recording and starts a fresh one, so this
+        # happens in normal use and must not splice two recordings together.
+        seen, recs = 0, []
+    if size == seen:
+        return list(recs)
+    head = _head_of(path)
+    out = list(recs)
+    try:
+        # Binary, because the offset is a byte count: seeking a text stream to
+        # an arbitrary byte offset can land mid-character and misdecode.
+        with open(path, "rb") as f:
+            f.seek(seen)
+            data = f.read()
+            # A trailing partial line means the proxy is mid-write; leave it
+            # for the next poll rather than parsing half a record.
+            cut = data.rfind(b"\n")
+            if cut < 0:
+                return out
+            whole = data[:cut + 1]
+            consumed = seen + len(whole)
+            for raw in whole.splitlines():
+                raw = raw.strip()
+                if raw:
                     try:
-                        out.append(json.loads(line))
+                        out.append(json.loads(raw.decode("utf8", "replace")))
                     except Exception:
                         pass
     except FileNotFoundError:
-        pass
-    return out
+        _TAIL.pop(path, None)
+        return []
+    _TAIL[path] = (consumed, out, head)
+    return list(out)
 
 
 def render_to_text(fn, *a, **kw):
@@ -420,7 +487,17 @@ class Console:
                     self.emit(f"{C_BODY}{piece}{C_OFF}")
         return nid
 
-    def rebuild(self):
+    def rebuild(self, *a, **kw):
+        """Timed wrapper. The recording grows all session, so rebuild cost
+        grows with it; the live-stream throttle scales off this measurement
+        instead of a constant that was true when it was written."""
+        t0 = time.time()
+        try:
+            return self._rebuild(*a, **kw)
+        finally:
+            self._rb_s = time.time() - t0
+
+    def _rebuild(self):
         """One group chat: four parties, every message once, in order.
 
         Clears the hover highlight: it is stored as a SCREEN position, and
@@ -1655,12 +1732,14 @@ class Console:
                 prev = [(j.get("text"), j.get("thinking")) for j in self.inflight]
                 self.inflight = read_inflight()
                 cur = [(j.get("text"), j.get("thinking")) for j in self.inflight]
-                # A full rebuild is ~170 ms on a long recording. The streamed
-                # text changes several times a second, so rebuilding on every
-                # change would eat a third of the CPU and make scrolling
-                # stutter while the model is talking. Twice a second is plenty
-                # for watching text arrive.
-                if cur != prev and now - getattr(self, "_live_rb", 0) > 0.5:
+                # The streamed text changes several times a second, so
+                # rebuilding on every change would eat the event loop and make
+                # scrolling stutter while the model is talking. Rebuild at most
+                # once per 4x its own measured cost, and never more than twice
+                # a second — so a long recording backs off on its own instead
+                # of freezing the view, which is what an 18 MB recording did.
+                gap = max(0.5, 4 * getattr(self, "_rb_s", 0.05))
+                if cur != prev and now - getattr(self, "_live_rb", 0) > gap:
                     self._live_rb = now
                     self.rebuild()
             if now - last_check > 0.5:

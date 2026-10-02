@@ -125,12 +125,24 @@ BACKGROUND = [
 ]
 
 
+# Needles lowered once at import, not once per comparison.
+_BACKGROUND_LC = [(label, icon, tuple(n.lower() for n in needles))
+                  for label, icon, needles in BACKGROUND]
+
+
 def background_kind(text):
-    """(label, icon) if this looks like a harness talking to itself."""
-    t = text or ""
-    for label, icon, needles in BACKGROUND:
+    """(label, icon) if this looks like a harness talking to itself.
+
+    `t.lower()` used to sit INSIDE the needle loop, so a 23,000-character
+    system prompt was lowercased once per needle — about twenty times per
+    record, 182 ms of a single console rebuild.
+    """
+    if not text:
+        return None, None
+    t = text.lower()
+    for label, icon, needles in _BACKGROUND_LC:
         for needle in needles:
-            if needle.lower() in t.lower():
+            if needle in t:
                 return label, icon
     return None, None
 
