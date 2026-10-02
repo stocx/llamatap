@@ -1,0 +1,13 @@
+# Recordings are captured conversations: your prompts, your file contents,
+# your paths. They are measurement data, never source, and they must never
+# end up in a commit.
+llamatap-records.jsonl
+llamatap-inflight.json
+llamatap-buffer.txt
+llamatap.log
+runs/
+
+__pycache__/
+*.pyc
+*.bak
+*.bak-*

@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# llamatap — watch what a harness and the model actually say to each other.
+#
+#   harness  ->  :9293 (llamatap)  ->  the model server  ->  llama-server
+#
+# Point any harness at the tap instead of the model server and nothing about
+# the conversation changes; every request and response is recorded, then
+# rendered as a readable thread with a stats panel.
+#
+# Why a proxy and not a server log: once the Jinja chat template has run, the
+# tool definitions and the system prompt are indistinguishable bytes inside one
+# long string. The tap sees the structure the HARNESS sent, which is the thing
+# being measured.
+
+set -uo pipefail
+
+# Where the Python files live: next to this script, following symlinks, so the
+# repo can be cloned anywhere and this can be symlinked onto PATH. Hardcoding
+# an install path meant the tool only ran on the machine it was written on.
+SELF="$0"
+while [ -L "$SELF" ]; do
+  L="$(readlink "$SELF")"
+  case "$L" in /*) SELF="$L" ;; *) SELF="$(dirname "$SELF")/$L" ;; esac
+done
+B="$(cd "$(dirname "$SELF")" && pwd)"
+
+CONFIG="${LLAMATAP_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/llamatap/config}"
+STATE="${LLAMATAP_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/llamatap}"
+
+# --- settings, lowest precedence first -------------------------------------
+# 1. built-in default   2. the config file   3. the environment   4. a flag
+#
+# The default assumes the model is on THIS machine, which is the common case
+# for someone installing this fresh. 8080 is llama-server's own default port.
+DEF_UPSTREAM="http://127.0.0.1:8080"
+
+upstream_src="default"
+UP="$DEF_UPSTREAM"
+
+if [ -f "$CONFIG" ]; then
+  # KEY=VALUE, # comments, no execution — the file is data, not a script, so a
+  # typo cannot run anything.
+  while IFS='=' read -r k v; do
+    k="${k%%#*}"; k="$(printf '%s' "$k" | tr -d '[:space:]')"
+    v="${v%%$'\r'}"; v="$(printf '%s' "$v" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/')"
+    [ -z "$k" ] && continue
+    case "$k" in
+      upstream|LLAMATAP_UPSTREAM) UP="$v"; upstream_src="config file" ;;
+      port|LLAMATAP_PORT)         export LLAMATAP_PORT="${LLAMATAP_PORT:-$v}" ;;
+      ssh_host|LLAMATAP_SSH_HOST) export LLAMATAP_SSH_HOST="${LLAMATAP_SSH_HOST:-$v}" ;;
+      swap_config|LLAMATAP_SWAP_CONFIG) export LLAMATAP_SWAP_CONFIG="${LLAMATAP_SWAP_CONFIG:-$v}" ;;
+      state|LLAMATAP_STATE)       STATE="$v" ;;
+    esac
+  done < "$CONFIG"
+fi
+
+if [ -n "${LLAMATAP_UPSTREAM:-}" ]; then
+  UP="$LLAMATAP_UPSTREAM"; upstream_src="LLAMATAP_UPSTREAM"
+fi
+
+# --upstream / --to anywhere in the arguments wins, and is removed before the
+# subcommand sees it.
+ARGS=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --upstream|--upstream=*)
+      if [ "$1" = "--upstream" ]; then shift; UP="${1:-}"; else UP="${1#--upstream=}"; fi
+      upstream_src="--upstream"
+      ;;
+    *) ARGS+=("$1") ;;
+  esac
+  shift || true
+done
+set -- ${ARGS+"${ARGS[@]}"}
+
+export LLAMATAP_UPSTREAM="$UP"
+export LLAMATAP_STATE="$STATE"
+mkdir -p "$STATE" 2>/dev/null || true
+export LLAMATAP_REC="${LLAMATAP_REC:-$STATE/llamatap-records.jsonl}"
+export LLAMATAP_LOG="${LLAMATAP_LOG:-$STATE/llamatap.log}"
+export LLAMATAP_INFLIGHT="${LLAMATAP_INFLIGHT:-$STATE/llamatap-inflight.json}"
+export LLAMATAP_RUNS="${LLAMATAP_RUNS:-$STATE/runs}"
+
+usage() {
+  cat <<USAGE
+usage: llamatap <command> [options]
+
+  serve            run the proxy in the foreground on :${LLAMATAP_PORT:-9293}
+                   (ctrl-c to stop). Archives the previous recording and
+                   starts clean; pass --keep to append to it instead.
+  console          LIVE group chat with the dashboard pinned below. This is
+                   the one you want.
+  list             numbered index of the recording
+  read [N]         render exchange N as text (default: the most recent)
+  all              render every recorded exchange
+  follow           simple scrolling version, no pinned panel. Use when piping.
+  replay N         re-send exchange N, optionally to a different model
+  log              tail the one-line-per-request summary log
+  clear            archive the recording and start fresh
+  config           print the resolved settings and where each came from
+
+where the model is
+  --upstream <url>        for this one command
+  LLAMATAP_UPSTREAM=<url> for this shell
+  $CONFIG
+                          to set it once (see 'llamatap config')
+  default: $DEF_UPSTREAM
+
+console keys
+  up/down PgUp PgDn Space Home End/g   scroll
+  click a green +   expand that node        x   number the nodes, 1-9 toggle
+  o / O             expand / collapse all   r   tool args: raw JSON vs readable
+  p  system prompt  f  launch settings      y   copy buffer    /  commands
+  Esc cancels (it does NOT quit)            q   quit
+
+loading an old recording
+  any of list / read / console / all / replay accept:
+    --file <path to a llamatap-records.jsonl>
+
+options for replay
+  --model <name>   replay against this model instead; repeat to compare several
+  --diff           also print the original reply, for comparison
+  --max-tokens N   override max_tokens for the replay
+
+options for read / follow / all
+  --raw            raw JSON, no prose, no panels, no icons
+  --no-icons       plain labels
+  --preamble       print the system prompt in full instead of summarising it
+  --no-flags       skip the launch-flag lookup
+  --name <label>   override the auto-detected harness name
+
+Point a harness at it by changing one string: its base URL becomes
+http://127.0.0.1:${LLAMATAP_PORT:-9293}/v1 instead of the model server's address.
+
+Replay is what makes the recording an experiment rather than a transcript: a
+captured request is the exact prompt a harness built, so re-sending it to a
+second model changes ONE variable and leaves every other byte identical.
+USAGE
+}
+
+show_config() {
+  printf 'upstream      %s\n' "$LLAMATAP_UPSTREAM"
+  printf '              from: %s\n' "$upstream_src"
+  printf 'listen port   %s\n' "${LLAMATAP_PORT:-9293}"
+  printf 'config file   %s%s\n' "$CONFIG" \
+    "$( [ -f "$CONFIG" ] && echo "" || echo "   (does not exist yet)" )"
+  printf 'state dir     %s\n' "$LLAMATAP_STATE"
+  printf 'recording     %s\n' "$LLAMATAP_REC"
+  printf 'code          %s\n' "$B"
+  if [ -n "${LLAMATAP_SSH_HOST:-}" ]; then
+    printf 'ssh fallback  %s:%s\n' "$LLAMATAP_SSH_HOST" "${LLAMATAP_SWAP_CONFIG:-unset}"
+  else
+    printf 'ssh fallback  not configured (launch flags come from /running only)\n'
+  fi
+  echo
+  echo "to set the model server permanently:"
+  echo "  mkdir -p $(dirname "$CONFIG")"
+  echo "  echo 'upstream = http://127.0.0.1:8080' > $CONFIG"
+  echo
+  echo "reachable?"
+  if command -v curl >/dev/null 2>&1; then
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$LLAMATAP_UPSTREAM/v1/models" 2>/dev/null)"
+    case "$code" in
+      200) echo "  yes — $LLAMATAP_UPSTREAM/v1/models answered 200" ;;
+      000|"") echo "  NO — nothing answered at $LLAMATAP_UPSTREAM" ;;
+      *) echo "  $LLAMATAP_UPSTREAM/v1/models answered $code" ;;
+    esac
+  else
+    echo "  curl not installed, cannot check"
+  fi
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  serve)  exec "$B/llamatap-proxy.py" "$@" ;;
+  list)   exec "$B/llamatap-thread.py" --list "$@" ;;
+  replay) exec "$B/llamatap-replay.py" "$@" ;;
+  read)   exec "$B/llamatap-thread.py" "$@" ;;
+  console) exec "$B/llamatap-console.py" "$@" ;;
+  follow)  exec "$B/llamatap-thread.py" --follow "$@" ;;
+  all)    exec "$B/llamatap-thread.py" --all "$@" ;;
+  log)    exec tail -f "$LLAMATAP_LOG" ;;
+  config|settings) show_config ;;
+  clear)  : > "$LLAMATAP_LOG"; : > "$LLAMATAP_REC"; echo "recording cleared" ;;
+  ""|-h|--help|help) usage ;;
+  *) echo "unknown command: $cmd" >&2; echo >&2; usage >&2; exit 1 ;;
+esac
