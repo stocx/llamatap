@@ -210,6 +210,32 @@ def match_commands(typed):
     sub = [c for c in COMMANDS if c not in pre and (t in c[0] or t in c[2].lower())]
     return pre + sub
 
+def clamp_spans(spans, width):
+    """Drop whatever lies past `width` CELLS.
+
+    Header rows — the participants roster, a turn label with its stats, a
+    node's `+ label   note` — were emitted at whatever width their content
+    happened to be. On a 70-column terminal 79 rows ran past the edge, and the
+    terminal wrapped them itself, at the wrong column and without the indent,
+    which read as the expansion being corrupt rather than as a line being too
+    long.
+    """
+    if width <= 0:
+        return spans
+    out = []
+    for pos, chunk, attr in spans:
+        if pos >= width:
+            break
+        if pos + dwidth(chunk) <= width:
+            out.append((pos, chunk, attr))
+            continue
+        head, _rest = take(chunk, width - pos)
+        if head:
+            out.append((pos, head, attr))
+        break
+    return out
+
+
 def ansi_lines(text):
     out = []
     for raw in text.split("\n"):
@@ -359,6 +385,23 @@ def read_inflight():
         return []
 
 
+def take(text, width):
+    """(prefix that fits in `width` cells, remainder).
+
+    Not `fit`: that appends an ellipsis, which is right for a truncated value
+    and wrong for a wrapped one — the text continues on the next line, so
+    marking it as cut would be a lie. It also miscounted, because the ellipsis
+    is a character and the remainder was sliced by character length.
+    """
+    w = 0
+    for i, ch in enumerate(text):
+        cw = dwidth(ch)
+        if w + cw > width:
+            return text[:i], text[i:]
+        w += cw
+    return text, ""
+
+
 def fit(text, width):
     """Truncate and pad to exactly `width` terminal CELLS.
 
@@ -446,6 +489,15 @@ class Console:
         threading.Thread(target=work, daemon=True).start()
 
     def _wrap(self, text, width, indent):
+        """Wrap to `width` CELLS, breaking inside a word when it is too long.
+
+        Breaking only on spaces meant a single unbroken token could not be
+        wrapped at all and ran straight off the screen — a 150-character
+        skill path in a system prompt overflowed an 90-column terminal by 84
+        cells. The terminal then wrapped it itself, at the wrong place and
+        without the indent, which looked like the expansion was corrupt.
+        """
+        width = max(8, width)
         out = []
         for para in (text or "").split("\n"):
             if not para:
@@ -453,12 +505,27 @@ class Console:
                 continue
             cur = ""
             for word in para.split(" "):
-                if dwidth(cur) + dwidth(word) + 1 > width:
+                # A word wider than the whole line can never fit beside
+                # anything; break it into width-sized pieces.
+                while dwidth(word) > width:
+                    if cur:
+                        out.append(indent + cur)
+                        cur = ""
+                    head, word = take(word, width)
+                    if not head:
+                        break
+                    out.append(indent + head)
+                if not word:
+                    continue
+                if cur and dwidth(cur) + 1 + dwidth(word) > width:
                     out.append(indent + cur)
                     cur = word
+                elif not cur:
+                    cur = word
                 else:
-                    cur = word if not cur else cur + " " + word
-            out.append(indent + cur)
+                    cur = cur + " " + word
+            if cur or not out or out[-1] != indent:
+                out.append(indent + cur)
         return out
 
     def bubble(self, body, col, indent, width, style="solid", text_col=None):
@@ -526,8 +593,9 @@ class Console:
         return []
 
     def emit(self, text):
+        width = self.scr.getmaxyx()[1]
         for spans in ansi_lines(text):
-            self.lines.append(spans)
+            self.lines.append(clamp_spans(spans, width))
 
     def emit_node(self, rec_i, rec, h, kind, key, label, note, depth, last,
                   base=12):
@@ -548,8 +616,13 @@ class Console:
         c0 = dwidth(head)
         self.hotspots.append((line_no, c0, c0 + dwidth(f"{sign} {label}") + 1, nid))
         if open_:
-            w = max(30, self.scr.getmaxyx()[1] - base - 8 - 3 * depth)
-            ind = " " * base + "   " * depth + "│ "
+            # Plain indentation, no gutter glyph. A `│ ` ran down the left of
+            # every expanded line; it marked nothing the indent did not
+            # already show, cost two columns on each of hundreds of lines of
+            # prose, and made an opened node look busier than the text it was
+            # showing.
+            w = max(30, self.scr.getmaxyx()[1] - base - 6 - 3 * depth)
+            ind = " " * base + "   " * depth + "  "
             for ln in self.node_body(kind, key, rec, h):
                 for piece in self._wrap(ln, w, ind) or [ind]:
                     self.emit(f"{C_BODY}{piece}{C_OFF}")

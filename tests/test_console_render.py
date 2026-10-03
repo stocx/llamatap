@@ -250,3 +250,101 @@ class BackgroundDetection(TapTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoRowRunsOffTheScreen(TapTest):
+    """Nothing emitted may be wider than the terminal.
+
+    A too-long row is wrapped by the TERMINAL, at the wrong column and without
+    the indent, so it reads as the view being corrupt rather than as a line
+    being long. Two separate causes, both fixed:
+
+    * `_wrap` broke on spaces only, so a single unbroken token — a
+      150-character skill path in a system prompt — could not be wrapped at
+      all and overflowed a 90-column terminal by 84 cells.
+    * header rows (the participants roster, a turn label with its stats, a
+      node's `+ label   note`) were never clamped to the width at all.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def console(self, cols, rows=40):
+        C = self.C
+        recs = [a_record(i) for i in range(4)]
+        # a long unbroken token, which is what used to overflow
+        recs[0]["req"]["messages"][0]["content"] = (
+            "# Tone\nbe terse\n"
+            "<location>/home/someone/.config/skills/synced/"
+            "f92aec64-fd7c-40e8-aca9-12d28fbccc14/reference/deeply/nested.md"
+            "</location>")
+
+        class Screen:
+            def getmaxyx(self):
+                return (rows, cols)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = recs; c.name = None; c.extra = []
+        c.follow = True; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": False}
+        c.open = set(); c.hover = None; c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}; c.inflight = []
+        c.msg = ""; c.msg_until = 0; c.tick = 0
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        return c
+
+    def widths(self, c):
+        return [self.C.dwidth("".join(ch for _, ch, _ in spans))
+                for spans in c.lines]
+
+    def test_nothing_overflows_collapsed(self):
+        for cols in (60, 70, 90, 120, 180):
+            with self.subTest(cols=cols):
+                c = self.console(cols)
+                bad = [w for w in self.widths(c) if w > cols]
+                self.assertEqual(bad, [], f"{len(bad)} rows past the edge")
+
+    def test_nothing_overflows_with_everything_expanded(self):
+        for cols in (60, 70, 90, 120, 180):
+            with self.subTest(cols=cols):
+                c = self.console(cols)
+                for nid in [n for (_l, _a, _b, n) in c.hotspots]:
+                    c.open.add(nid)
+                c.rebuild()
+                bad = [w for w in self.widths(c) if w > cols]
+                self.assertEqual(bad, [], f"{len(bad)} rows past the edge")
+
+    def test_wrapping_preserves_every_character(self):
+        """Breaking a long word must not drop one, and must not pretend the
+        text was truncated — it continues on the next line."""
+        c = self.console(90)
+        text = ("/home/someone/.config/skills/synced/"
+                "f92aec64-fd7c-40e8-aca9-12d28fbccc14/x.md")
+        for width in (12, 20, 30, 64):
+            with self.subTest(width=width):
+                lines = c._wrap(text, width, "  ")
+                joined = "".join(l[2:] for l in lines)
+                self.assertEqual(joined, text, "characters were lost")
+                self.assertNotIn("…", joined,
+                                 "wrapping claimed the text was cut")
+                for l in lines:
+                    self.assertLessEqual(self.C.dwidth(l), width + 2)
+
+    def test_take_is_exact_on_wide_characters(self):
+        head, rest = self.C.take("日本語abc", 5)
+        self.assertEqual(self.C.dwidth(head), 4,
+                         "a 2-cell character must not be split in half")
+        self.assertEqual(head + rest, "日本語abc")
+
+    def test_expanded_bodies_have_no_gutter_glyph(self):
+        c = self.console(120)
+        pre = [n for (_l, _a, _b, n) in c.hotspots if n[1] == "preamble"]
+        c.open.update(pre[:1])
+        c.rebuild()
+        body = "\n".join("".join(ch for _, ch, _ in s) for s in c.lines)
+        self.assertNotIn("│ be terse", body,
+                         "the vertical gutter is back on expanded content")
