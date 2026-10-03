@@ -350,13 +350,19 @@ class NoRowRunsOffTheScreen(TapTest):
                          "the vertical gutter is back on expanded content")
 
 
-class HoverHighlight(TapTest):
-    """The mouse highlight must mark the target, not the row.
+class ClickTarget(TapTest):
+    """A node row is clickable anywhere along it.
 
-    Applying A_UNDERLINE to the whole row underlined the leading indent too,
-    and underlined spaces are a solid horizontal rule running out to the left
-    of the label. It read as a divider drawn on purpose — and since the
-    highlight expires after 1.5s, as one that came and went at random.
+    A one-character `+` is a precision target. Nothing else on a node's row is
+    clickable, so widening the target to the whole line costs nothing and
+    removes the fiddliness.
+
+    There is deliberately NO hover highlight any more. With the whole row
+    clickable the green +/- glyph is already the affordance, and a second
+    signal for the same fact was the part that kept going wrong: an underline
+    that drew a rule across the indent, then a mark that lingered after the
+    click that dismissed it, then a colour that could never appear because the
+    terminal reported no motion.
     """
 
     def setUp(self):
@@ -375,7 +381,7 @@ class HoverHighlight(TapTest):
         c.name = None; c.extra = []; c.follow = False; c.top = 0
         c.opts = {"rawjson": False, "preamble": False, "flags": False,
                   "repeats": False, "fold_thinking": False}
-        c.open = set(); c.hover = None; c.hover_until = 0; c.hotspots = []
+        c.open = set(); c.touched = set(); c.hotspots = []
         c.starts = []; c.menu = []; c.detail = None; c.node_bodies = {}
         c.inflight = []; c.msg = ""; c.msg_until = 0; c.tick = 0
         c._flags = ""; c._flags_started = True; c._flags_err = ""
@@ -383,75 +389,33 @@ class HoverHighlight(TapTest):
         c.rebuild()
         return c
 
-    def test_hover_reports_the_clickable_columns(self):
-        import time
+    def test_any_column_on_the_row_hits_the_node(self):
         c = self.console()
-        line, c0, c1, _nid = c.hotspots[0]
-        c.hover = (line - c.top, c0 + 1)
-        c.hover_until = time.time() + 10
-        self.assertEqual(c.hover_line(), (line, c0, c1))
+        line, c0, c1, nid = c.hotspots[0]
+        for x in (0, 1, c0, c0 + 1, c1, c1 + 20, 110):
+            with self.subTest(x=x):
+                hs = c.hotspot_at(line - c.top, x)
+                self.assertIsNotNone(hs, f"column {x} missed the node")
+                self.assertEqual(hs[3], nid)
 
-    def test_nothing_is_ever_underlined(self):
-        """A colour change was what was asked for. An underline covers the
-        leading indent too, and underlined spaces are a solid rule."""
+    def test_a_row_with_no_node_is_not_clickable(self):
+        c = self.console()
+        node_lines = {l for (l, _a, _b, _n) in c.hotspots}
+        plain = next(i for i in range(len(c.lines)) if i not in node_lines)
+        self.assertIsNone(c.hotspot_at(plain - c.top, 5))
+
+    def test_clicking_toggles(self):
+        c = self.console()
+        line, _c0, _c1, nid = c.hotspots[0]
+        before = len(c.lines)
+        c.toggle(c.hotspot_at(line - c.top, 90)[3])
+        self.assertNotEqual(len(c.lines), before,
+                            "a click away from the + did nothing")
+
+    def test_no_hover_machinery_remains(self):
         src = open(os.path.join(ROOT, "llamatap-console.py")).read()
-        self.assertNotIn("A_UNDERLINE", src,
-                         "the hover underline is back")
-
-    def test_hover_recolours_rather_than_adds_an_attribute(self):
-        import time
-        c = self.console()
-        line, c0, c1, _nid = c.hotspots[0]
-        c.hover = (line - c.top, c0 + 1)
-        c.hover_until = time.time() + 10
-        hl_line, hl_c0, hl_c1 = c.hover_line()
-        plus = next(sp for sp in c.lines[line]
-                    if sp[1].strip() in ("+", "−"))
-        col, chunk, _attr = plus
-        self.assertTrue(col + self.C.dwidth(chunk) > hl_c0 and col <= hl_c1,
-                        "the + is not inside the highlighted range")
-
-    def test_clicking_clears_the_highlight_immediately(self):
-        """It used to be re-armed by the click event itself, so the mark sat
-        there for 1.5 s after the click, doing nothing."""
-        src = open(os.path.join(ROOT, "llamatap-console.py")).read()
-        click = src[src.index("BUTTON1_CLICKED"):]
-        click = click[:click.index("elif bstate")]
-        self.assertIn("self.hover, self.hover_until = None, 0.0", click,
-                      "a click leaves the highlight armed")
-
-    def test_the_indent_is_not_highlighted(self):
-        """The whole point: no mark under the leading blanks."""
-        import time
-        c = self.console()
-        line, c0, c1, _nid = c.hotspots[0]
-        c.hover = (line - c.top, c0 + 1)
-        c.hover_until = time.time() + 10
-        hl_line, hl_c0, hl_c1 = c.hover_line()
-        lead_col, lead_text, _a = c.lines[line][0]
-        self.assertTrue(lead_text.strip() == "",
-                        "expected the first span to be the indent")
-        highlighted = (lead_col + self.C.dwidth(lead_text) > hl_c0
-                       and lead_col <= hl_c1)
-        self.assertFalse(highlighted,
-                         "the indent is underlined, which draws a rule")
-
-    def test_no_hover_means_no_highlight(self):
-        c = self.console()
-        self.assertIsNone(c.hover_line())
-
-    def test_a_stale_hover_expires(self):
-        import time
-        c = self.console()
-        line, c0, _c1, _nid = c.hotspots[0]
-        c.hover = (line - c.top, c0 + 1)
-        c.hover_until = time.time() - 1
-        self.assertIsNone(c.hover_line(),
-                          "a stale highlight would look permanent")
-
-    def test_hovering_nothing_clickable_highlights_nothing(self):
-        import time
-        c = self.console()
-        c.hover = (0, 0)
-        c.hover_until = time.time() + 10
-        self.assertIsNone(c.hover_line())
+        for token in ("A_UNDERLINE", "hover_until", "mouse_motion", "1003h"):
+            with self.subTest(token=token):
+                self.assertNotIn(token, src,
+                                 f"{token} is back; the +/- glyph is the "
+                                 f"affordance now")

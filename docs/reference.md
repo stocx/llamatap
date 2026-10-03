@@ -182,7 +182,8 @@ row and always shown; the two no longer share a toggle.
     ctrl-f / ctrl-b  scroll a screen (also Space, PgDn, PgUp)
     gg               jump to the start of the conversation
     G                jump to the newest message and follow new ones
-    click a green +  expand that node in place; click again to collapse
+    click a node row expand or collapse it — anywhere on the line, not just
+                     the + itself
     x                number the expandable nodes, then press 1-9 to toggle
     o / O            expand all in this exchange / collapse everything
     r                tool-call arguments: raw JSON off the wire vs readable

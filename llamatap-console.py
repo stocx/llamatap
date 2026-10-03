@@ -108,10 +108,6 @@ INFLIGHT = os.environ.get("LLAMATAP_INFLIGHT",
 SPIN = os.environ.get("LLAMATAP_SPINNER", "⠏⠛⠹⢸⣰⣤⣆⡇")
 # A `+` in its own colour is the affordance: it says "there is more here".
 C_PLUS, C_DIM, C_BODY, C_OFF = "\033[32m", "\033[36m", "\033[37m", "\033[0m"
-# The `+` is green at rest and yellow under the mouse. A COLOUR CHANGE is what
-# was asked for originally; an underline was used instead, which drew a rule
-# across the leading indent and read as a divider that blinked on and off.
-HOVER_PAIR = 3          # yellow — see PAIRS
 RUNS = os.environ.get("LLAMATAP_RUNS") or os.path.join(_STATE, "runs")
 
 ANSI = re.compile(r"\033\[([0-9;]*)m")
@@ -164,7 +160,7 @@ HELP = [
     "ctrl-f / ctrl-b  scroll a screen (also Space, PgDn, PgUp)",
     "gg               jump to the start of the conversation",
     "G                jump to the newest message and follow new ones",
-    "click a green +  expand that node in place; click again to collapse",
+    "click a node row expand or collapse it — anywhere on the line",
     "x                number the expandable nodes, then press 1-9 to toggle",
     "o / O            expand all in this exchange / collapse everything",
     "r                tool-call arguments: raw JSON off the wire vs readable",
@@ -453,8 +449,6 @@ class Console:
                                 # a default never overrides an explicit choice
         self.node_bodies = {}   # precomputed bodies for synthetic nodes
         self.cmd_sel = 0        # highlighted row in the command palette
-        self.hover = None       # (y, x) of the mouse, for highlighting
-        self.hover_until = 0.0  # highlights fade; a stuck underline reads as
                                 # a rendering artifact rather than a cursor
 
     # ------------------------------------------------------------- conversation
@@ -647,11 +641,6 @@ class Console:
     def _rebuild(self):
         """One group chat: four parties, every message once, in order.
 
-        Clears the hover highlight: it is stored as a SCREEN position, and
-        once content shifts that position maps to a different line, so an
-        unrelated row lights up until the timer expires. That reads as a
-        flicker rather than as a cursor.
-
         Exchanges are flattened by T.conversation(); this only lays them out.
         A per-exchange header repeated the participants and the setup for every
         turn, which read as a stack of separate transcripts rather than one
@@ -659,7 +648,6 @@ class Console:
         """
         self.lines, self.hotspots, self.starts = [], [], []
         self.node_bodies = {}
-        self.hover, self.hover_until = None, 0.0
         self._dash_rec, self._dash_bg = None, False
         self._rec_name = {}
         W = self.scr.getmaxyx()[1]
@@ -1312,19 +1300,11 @@ class Console:
         H, W = scr.getmaxyx()
         vh = self.view_h()
 
-        hl = self.hover_line()
-        hl_line, hl_c0, hl_c1 = hl if hl else (None, 0, 0)
         for r in range(vh):
             i = self.top + r
             if i >= len(self.lines):
                 break
             for col, chunk, attr in self.lines[i]:
-                # Recolour the clickable span; never underline. Underlining
-                # covered the indent too, and underlined spaces are a solid
-                # horizontal rule.
-                if (i == hl_line and col + dwidth(chunk) > hl_c0
-                        and col <= hl_c1):
-                    attr = curses.color_pair(HOVER_PAIR) | curses.A_BOLD
                 if col < W - 1:
                     try:
                         scr.addnstr(r, col, chunk, W - 1 - col, attr)
@@ -1397,7 +1377,7 @@ class Console:
             # at the terminal width, and `q quit` used to sit at the very end
             # where it was the first thing lost on an 80-column window.
             hint = self.msg or (" / commands  ·  q quit  ·  jk gg G scroll  ·  "
-                                "click a green + to expand  ·  x list  ·  o/O all  ·  "
+                                "click a row to expand  ·  x list  ·  o/O all  ·  "
                                 "r raw json  ·  p system prompt  ·  y copy ")
             try:
                 scr.addnstr(H - 1, 0, hint.ljust(W - 1), W - 1, curses.color_pair(6))
@@ -1420,34 +1400,24 @@ class Console:
         return self.recs[ri] if 0 <= ri < len(self.recs) else None
 
     def hotspot_at(self, y, x):
-        """The expandable node under a screen position, if any."""
+        """The expandable node on this ROW, if any.
+
+        The column is ignored on purpose: a one-character `+` is a precision
+        target, and nothing else on a node's row is clickable, so there is no
+        ambiguity about what a click there means. Anywhere on the line works.
+        """
         li = self.top + y
         for (l, c0, c1, nid) in self.hotspots:
-            if l == li and c0 <= x <= c1:
+            if l == li:
                 return (l, c0, c1, nid)
         return None
 
-    def hover_line(self):
-        """(buffer line, first column, last column) the mouse is over.
-
-        The COLUMNS matter. The highlight used to apply to the whole row,
-        which meant underlining the leading indent — and underlined spaces are
-        a solid horizontal rule running out to the left of the label. It read
-        as a divider someone had drawn on purpose. Now only the clickable span
-        is marked, which is both quieter and more useful: it shows you exactly
-        what you would be clicking.
-
-        Expires: terminals only report motion while it happens, so a highlight
-        left behind looks like the renderer underlined something permanently.
-        """
-        if not self.hover or time.time() > getattr(self, "hover_until", 0):
-            return None
-        y, x = self.hover
-        hs = self.hotspot_at(y, x)
-        if not hs:
-            return None
-        _line, c0, c1, _nid = hs
-        return (self.top + y, c0, c1)
+    # There is deliberately no hover highlight. With the whole row clickable,
+    # the green +/- glyph is already the affordance; a second signal for the
+    # same fact was redundant, and it was the part that kept going wrong —
+    # first an underline that drew a rule across the indent, then a mark that
+    # lingered after the click that dismissed it, then a colour that could
+    # never appear because the terminal was not reporting motion at all.
 
     def toggle(self, nid):
         if nid in self.open:
@@ -1828,19 +1798,13 @@ class Console:
                         _, mx, my, _, bstate = curses.getmouse()
                     except curses.error:
                         continue
-                    self.hover = (my, mx)
-                    self.hover_until = time.time() + 1.5
                     if bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED):
                         hs = self.hotspot_at(my, mx)
-                        # Drop the highlight on click. It used to be re-armed
-                        # for another 1.5 s by this very event, so after
-                        # clicking, the mark sat there for two seconds doing
-                        # nothing — the single most irritating part of it.
-                        self.hover, self.hover_until = None, 0.0
                         if hs:
                             self.toggle(hs[3])
                         else:
-                            self.note("nothing to expand there — the green + marks what opens")
+                            self.note("nothing to expand on that line — "
+                                      "a green + or − marks what opens")
                     elif bstate & getattr(curses, "BUTTON4_PRESSED", 0):
                         self.top = max(0, self.top - 3); self.follow = False
                     elif bstate & getattr(curses, "BUTTON5_PRESSED", 0):
