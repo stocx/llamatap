@@ -449,6 +449,8 @@ class Console:
         self.hotspots, self.detail, self.menu, self.starts = [], None, [], []
         self._dash_rec, self._dash_bg = None, False
         self.open = set()       # expanded nodes, by (exchange, kind, key)
+        self.touched = set()    # nodes the user has opened or closed by hand;
+                                # a default never overrides an explicit choice
         self.node_bodies = {}   # precomputed bodies for synthetic nodes
         self.cmd_sel = 0        # highlighted row in the command palette
         self.hover = None       # (y, x) of the mouse, for highlighting
@@ -771,11 +773,17 @@ class Console:
                                "repeat", key, f"↻ {who}", note, 1, True, base=12)
                 continue
 
-            if kind == "thinking" and self.opts.get("fold_thinking"):
-                # Collapsed to one clickable row. The cost stays visible even
-                # when the text is hidden: a 1,370-token think is most of what
-                # a turn spent, and hiding that without saying so would make
-                # the thread look cheaper than it was.
+            if kind == "thinking":
+                # ALWAYS a +/- node, like everything else that can be opened.
+                # It used to become one only after /thinking, so a single
+                # thought could not be collapsed without first switching a
+                # global mode — which is not how any other node behaves.
+                # /thinking now just sets the default for all of them.
+                #
+                # The cost stays visible even when the text is hidden: a
+                # 1,370-token think is most of what a turn spent, and hiding
+                # that without saying so would make the thread look cheaper
+                # than it was.
                 key = f"{mi}"
                 self.node_bodies[("thinking", key)] = (m.get("text") or "").split("\n")
                 tok_ = m.get("tokens") or (m.get("chars", 0) // 4)
@@ -787,6 +795,13 @@ class Console:
                     # Say it rather than omitting it. A row showing only tokens
                     # looks like a thought that took no time.
                     note += " · duration unknown"
+                nid = (m.get("rec", 0), "thinking", key)
+                if nid not in self.touched:
+                    # Follow the current default until the user says otherwise.
+                    if self.opts.get("fold_thinking"):
+                        self.open.discard(nid)
+                    else:
+                        self.open.add(nid)
                 self.emit_node(m.get("rec", 0), self.recs[m.get("rec", 0)], None,
                                "thinking", key, f"💭 {who}", note, 1, True,
                                base=12)
@@ -1439,6 +1454,7 @@ class Console:
             self.open.discard(nid)
         else:
             self.open.add(nid)
+        self.touched.add(nid)
         self.rebuild()
 
     def expand_menu(self):
@@ -1529,24 +1545,20 @@ class Console:
                 self.rebuild()
         elif c in ("thinking", "think"):
             arg = (args[0].lower() if args else "")
+            # These set the DEFAULT for every thought, so they also clear any
+            # per-node decisions — otherwise "close them all" would leave the
+            # ones you had opened by hand still open.
+            self.touched = {n for n in self.touched if n[1] != "thinking"}
             if arg in ("open", "all", "expand"):
-                self.opts["fold_thinking"] = True
-                self.rebuild()
-                for (_l, _c0, _c1, nid) in self.hotspots:
-                    if nid[1] == "thinking":
-                        self.open.add(nid)
+                self.opts["fold_thinking"] = False
                 self.rebuild()
                 self.note("every thought expanded")
             elif arg in ("close", "none", "collapse"):
                 self.opts["fold_thinking"] = True
-                self.open = {n for n in self.open if n[1] != "thinking"}
                 self.rebuild()
                 self.note("thinking folded to one line each")
             else:
                 self.opts["fold_thinking"] = not self.opts.get("fold_thinking", False)
-                if not self.opts["fold_thinking"]:
-                    # Leaving folded mode, so the per-node open state is moot.
-                    self.open = {n for n in self.open if n[1] != "thinking"}
                 self.rebuild()
                 self.note("thinking folded — click a 💭 line to open one"
                           if self.opts["fold_thinking"] else "thinking shown in full")

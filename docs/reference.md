@@ -262,20 +262,26 @@ with the prefix cache working, re-sent tokens are nearly free to process.
 
 A thinking block is routinely the largest part of a turn — 1,370 tokens and
 20 seconds in one measured case — so reading the conversation around one means
-scrolling past all of it. `/thinking` or `t` folds each to a single row:
+scrolling past all of it.
 
-    + 💭 qwen3.5-35b-moe (thinking)   ~1,370 tokens · ~22.4s
+**Every thought is a `+`/`−` node from the start**, like anything else that
+opens. Click one to collapse it:
 
-Same four states as repeats:
+    − 💭 qwen3.5-35b-moe (thinking)   ~1,370 tokens · ~22.4s     expanded
+    + 💭 qwen3.5-35b-moe (thinking)   ~1,370 tokens · ~22.4s     collapsed
+
+`/thinking` sets the default for all of them at once:
 
 | | |
 |---|---|
-| `/thinking` or `t` | folded ⇄ full. **Full is the default** |
-| `/thinking open` | folded, with every one expanded |
-| `/thinking close` | collapse them all again |
-| click a `💭` row | expand just that one |
+| click a `💭` row | collapse or expand just that one, any time |
+| `/thinking` or `t` | flip the default: folded ⇄ full. **Full is the default** |
+| `/thinking close` | fold every one |
+| `/thinking open` | expand every one |
 
-`--fold-thinking` starts the console folded.
+A command sets the default and clears per-node choices, so "fold every one"
+means every one — including any you had opened by hand. `--fold-thinking`
+starts the console folded.
 
 **Folding hides the text, never the cost.** A collapsed row always carries its
 tokens and its seconds, and when the duration cannot be derived it says
