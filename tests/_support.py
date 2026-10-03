@@ -16,6 +16,7 @@ import http.server
 import importlib.util
 import json
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -91,7 +92,13 @@ def tap_env(**extra):
             "LLAMATAP_SWAP_CONFIG", "LLAMATAP_KEEP", "LLAMATAP_CAP")
     saved = {k: os.environ.get(k) for k in keys}
     saved.update({k: os.environ.get(k) for k in extra})
-    with tempfile.TemporaryDirectory(prefix="llamatap-test-") as d:
+    # mkdtemp + a tolerant rmtree, not TemporaryDirectory. The proxy's handler
+    # threads are daemons: one can still be publishing the in-flight file as
+    # the directory is being removed, and TemporaryDirectory then raises
+    # "Directory not empty" and fails the test that had already passed. A
+    # leftover temp file is not a defect in llamatap.
+    d = tempfile.mkdtemp(prefix="llamatap-test-")
+    try:
         env = {
             "LLAMATAP_STATE": d,
             "LLAMATAP_REC": os.path.join(d, "llamatap-records.jsonl"),
@@ -106,14 +113,14 @@ def tap_env(**extra):
         for k in keys:
             os.environ.pop(k, None)
         os.environ.update(env)
-        try:
-            yield d
-        finally:
-            for k, v in saved.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
+        yield d
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def free_port():
