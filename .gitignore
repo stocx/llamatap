@@ -12,6 +12,12 @@ __pycache__/
 *.bak
 *.bak-*
 
-# Harness test output. Driving a harness with this repo as its working
-# directory leaves its scratch work here; it is evidence, not source.
+# Harness and agent scratch. Pointing a harness or a review agent at this repo
+# as its working directory leaves its workings here — generated test programs,
+# linter caches — and none of it is source. Keeping these listed means a stray
+# file shows up as untracked and gets noticed, instead of blending in.
 hello_world_test/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
