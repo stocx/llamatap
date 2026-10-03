@@ -348,3 +348,81 @@ class NoRowRunsOffTheScreen(TapTest):
         body = "\n".join("".join(ch for _, ch, _ in s) for s in c.lines)
         self.assertNotIn("│ be terse", body,
                          "the vertical gutter is back on expanded content")
+
+
+class HoverHighlight(TapTest):
+    """The mouse highlight must mark the target, not the row.
+
+    Applying A_UNDERLINE to the whole row underlined the leading indent too,
+    and underlined spaces are a solid horizontal rule running out to the left
+    of the label. It read as a divider drawn on purpose — and since the
+    highlight expires after 1.5s, as one that came and went at random.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def console(self, cols=120):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, cols)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(i) for i in range(3)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": False}
+        c.open = set(); c.hover = None; c.hover_until = 0; c.hotspots = []
+        c.starts = []; c.menu = []; c.detail = None; c.node_bodies = {}
+        c.inflight = []; c.msg = ""; c.msg_until = 0; c.tick = 0
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        return c
+
+    def test_hover_reports_the_clickable_columns(self):
+        import time
+        c = self.console()
+        line, c0, c1, _nid = c.hotspots[0]
+        c.hover = (line - c.top, c0 + 1)
+        c.hover_until = time.time() + 10
+        self.assertEqual(c.hover_line(), (line, c0, c1))
+
+    def test_the_indent_is_not_highlighted(self):
+        """The whole point: no underline under the leading blanks."""
+        import time
+        c = self.console()
+        line, c0, c1, _nid = c.hotspots[0]
+        c.hover = (line - c.top, c0 + 1)
+        c.hover_until = time.time() + 10
+        hl_line, hl_c0, hl_c1 = c.hover_line()
+        lead_col, lead_text, _a = c.lines[line][0]
+        self.assertTrue(lead_text.strip() == "",
+                        "expected the first span to be the indent")
+        highlighted = (lead_col + self.C.dwidth(lead_text) > hl_c0
+                       and lead_col <= hl_c1)
+        self.assertFalse(highlighted,
+                         "the indent is underlined, which draws a rule")
+
+    def test_no_hover_means_no_highlight(self):
+        c = self.console()
+        self.assertIsNone(c.hover_line())
+
+    def test_a_stale_hover_expires(self):
+        import time
+        c = self.console()
+        line, c0, _c1, _nid = c.hotspots[0]
+        c.hover = (line - c.top, c0 + 1)
+        c.hover_until = time.time() - 1
+        self.assertIsNone(c.hover_line(),
+                          "a stale highlight would look permanent")
+
+    def test_hovering_nothing_clickable_highlights_nothing(self):
+        import time
+        c = self.console()
+        c.hover = (0, 0)
+        c.hover_until = time.time() + 10
+        self.assertIsNone(c.hover_line())

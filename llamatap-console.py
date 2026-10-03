@@ -1294,13 +1294,16 @@ class Console:
         vh = self.view_h()
 
         hl = self.hover_line()
+        hl_line, hl_c0, hl_c1 = hl if hl else (None, 0, 0)
         for r in range(vh):
             i = self.top + r
             if i >= len(self.lines):
                 break
-            extra_attr = curses.A_BOLD | curses.A_UNDERLINE if i == hl else 0
             for col, chunk, attr in self.lines[i]:
-                attr |= extra_attr
+                # Only the clickable span, not the whole row.
+                if (i == hl_line and col + dwidth(chunk) > hl_c0
+                        and col <= hl_c1):
+                    attr |= curses.A_BOLD | curses.A_UNDERLINE
                 if col < W - 1:
                     try:
                         scr.addnstr(r, col, chunk, W - 1 - col, attr)
@@ -1404,7 +1407,14 @@ class Console:
         return None
 
     def hover_line(self):
-        """Buffer line the mouse is over, for highlighting.
+        """(buffer line, first column, last column) the mouse is over.
+
+        The COLUMNS matter. The highlight used to apply to the whole row,
+        which meant underlining the leading indent — and underlined spaces are
+        a solid horizontal rule running out to the left of the label. It read
+        as a divider someone had drawn on purpose. Now only the clickable span
+        is marked, which is both quieter and more useful: it shows you exactly
+        what you would be clicking.
 
         Expires: terminals only report motion while it happens, so a highlight
         left behind looks like the renderer underlined something permanently.
@@ -1413,7 +1423,10 @@ class Console:
             return None
         y, x = self.hover
         hs = self.hotspot_at(y, x)
-        return (self.top + y) if hs else None
+        if not hs:
+            return None
+        _line, c0, c1, _nid = hs
+        return (self.top + y, c0, c1)
 
     def toggle(self, nid):
         if nid in self.open:
