@@ -17,7 +17,7 @@ import json
 import os
 import unittest
 
-from _support import TapTest, load, write_records
+from _support import ROOT, TapTest, load, write_records
 
 
 def a_record(i, text="hello"):
@@ -391,8 +391,37 @@ class HoverHighlight(TapTest):
         c.hover_until = time.time() + 10
         self.assertEqual(c.hover_line(), (line, c0, c1))
 
+    def test_nothing_is_ever_underlined(self):
+        """A colour change was what was asked for. An underline covers the
+        leading indent too, and underlined spaces are a solid rule."""
+        src = open(os.path.join(ROOT, "llamatap-console.py")).read()
+        self.assertNotIn("A_UNDERLINE", src,
+                         "the hover underline is back")
+
+    def test_hover_recolours_rather_than_adds_an_attribute(self):
+        import time
+        c = self.console()
+        line, c0, c1, _nid = c.hotspots[0]
+        c.hover = (line - c.top, c0 + 1)
+        c.hover_until = time.time() + 10
+        hl_line, hl_c0, hl_c1 = c.hover_line()
+        plus = next(sp for sp in c.lines[line]
+                    if sp[1].strip() in ("+", "−"))
+        col, chunk, _attr = plus
+        self.assertTrue(col + self.C.dwidth(chunk) > hl_c0 and col <= hl_c1,
+                        "the + is not inside the highlighted range")
+
+    def test_clicking_clears_the_highlight_immediately(self):
+        """It used to be re-armed by the click event itself, so the mark sat
+        there for 1.5 s after the click, doing nothing."""
+        src = open(os.path.join(ROOT, "llamatap-console.py")).read()
+        click = src[src.index("BUTTON1_CLICKED"):]
+        click = click[:click.index("elif bstate")]
+        self.assertIn("self.hover, self.hover_until = None, 0.0", click,
+                      "a click leaves the highlight armed")
+
     def test_the_indent_is_not_highlighted(self):
-        """The whole point: no underline under the leading blanks."""
+        """The whole point: no mark under the leading blanks."""
         import time
         c = self.console()
         line, c0, c1, _nid = c.hotspots[0]

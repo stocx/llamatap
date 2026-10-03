@@ -108,6 +108,10 @@ INFLIGHT = os.environ.get("LLAMATAP_INFLIGHT",
 SPIN = os.environ.get("LLAMATAP_SPINNER", "⠏⠛⠹⢸⣰⣤⣆⡇")
 # A `+` in its own colour is the affordance: it says "there is more here".
 C_PLUS, C_DIM, C_BODY, C_OFF = "\033[32m", "\033[36m", "\033[37m", "\033[0m"
+# The `+` is green at rest and yellow under the mouse. A COLOUR CHANGE is what
+# was asked for originally; an underline was used instead, which drew a rule
+# across the leading indent and read as a divider that blinked on and off.
+HOVER_PAIR = 3          # yellow — see PAIRS
 RUNS = os.environ.get("LLAMATAP_RUNS") or os.path.join(_STATE, "runs")
 
 ANSI = re.compile(r"\033\[([0-9;]*)m")
@@ -1300,10 +1304,12 @@ class Console:
             if i >= len(self.lines):
                 break
             for col, chunk, attr in self.lines[i]:
-                # Only the clickable span, not the whole row.
+                # Recolour the clickable span; never underline. Underlining
+                # covered the indent too, and underlined spaces are a solid
+                # horizontal rule.
                 if (i == hl_line and col + dwidth(chunk) > hl_c0
                         and col <= hl_c1):
-                    attr |= curses.A_BOLD | curses.A_UNDERLINE
+                    attr = curses.color_pair(HOVER_PAIR) | curses.A_BOLD
                 if col < W - 1:
                     try:
                         scr.addnstr(r, col, chunk, W - 1 - col, attr)
@@ -1814,6 +1820,11 @@ class Console:
                     self.hover_until = time.time() + 1.5
                     if bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED):
                         hs = self.hotspot_at(my, mx)
+                        # Drop the highlight on click. It used to be re-armed
+                        # for another 1.5 s by this very event, so after
+                        # clicking, the mark sat there for two seconds doing
+                        # nothing — the single most irritating part of it.
+                        self.hover, self.hover_until = None, 0.0
                         if hs:
                             self.toggle(hs[3])
                         else:
