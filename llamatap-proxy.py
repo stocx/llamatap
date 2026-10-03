@@ -366,24 +366,41 @@ class Tap(http.server.BaseHTTPRequestHandler):
             resp = urllib.request.urlopen(req, timeout=600)
             status, rhdrs = resp.status, resp.headers
         except urllib.error.HTTPError as e:
+            # Every exit from here goes through the finally: reading the error
+            # body can itself fail, and the client can disappear while the
+            # error is being written. Either used to leak the in-flight entry
+            # and leave the upstream response open.
             resp, status, rhdrs = e, e.code, e.headers
-            err = resp.read()
-            log(f"\n===== {status} {method} {self.path} =====")
-            if body:
+            err = b""
+            try:
+                err = resp.read()
+                log(f"\n===== {status} {method} {self.path} =====")
+                if body:
+                    try:
+                        log("REQUEST:\n"
+                            + json.dumps(json.loads(body), indent=2)[:20000])
+                    except Exception:
+                        log("REQUEST (raw):\n"
+                            + body.decode("utf8", "replace")[:20000])
+                log("RESPONSE:\n" + err.decode("utf8", "replace")[:4000])
+                self.send_response(status)
+                self.send_header("Content-Type",
+                                 rhdrs.get("Content-Type", "application/json"))
+                self.send_header("Content-Length", str(len(err)))
+                self.end_headers()
+                self.wfile.write(err)
+            except Exception as inner:
+                log(f"  while returning the upstream error: "
+                    f"{type(inner).__name__}: {inner}")
+            finally:
+                inflight_clear(key)
+                record(self.path, status, original, err,
+                       {"elapsed_ms": int((time.time() - t0) * 1000),
+                        **({"shims": list(self._shims)} if self._shims else {})})
                 try:
-                    log("REQUEST:\n" + json.dumps(json.loads(body), indent=2)[:20000])
+                    resp.close()
                 except Exception:
-                    log("REQUEST (raw):\n" + body.decode("utf8", "replace")[:20000])
-            log("RESPONSE:\n" + err.decode("utf8", "replace")[:4000])
-            inflight_clear(key)
-            record(self.path, status, original, err,
-                   {"elapsed_ms": int((time.time() - t0) * 1000),
-                    **({"shims": list(self._shims)} if self._shims else {})})
-            self.send_response(status)
-            self.send_header("Content-Type", rhdrs.get("Content-Type", "application/json"))
-            self.send_header("Content-Length", str(len(err)))
-            self.end_headers()
-            self.wfile.write(err)
+                    pass
             return
         except Exception as e:
             # URLError, socket timeout, DNS failure: the upstream is not
@@ -417,12 +434,6 @@ class Tap(http.server.BaseHTTPRequestHandler):
                 log("REQUEST (full):\n" + json.dumps(json.loads(body), indent=2))
             except Exception:
                 pass
-        self.send_response(status)
-        for k, v in rhdrs.items():
-            if k.lower() not in ("transfer-encoding", "content-length", "connection"):
-                self.send_header(k, v)
-        self.send_header("Transfer-Encoding", "chunked")
-        self.end_headers()
         # Capture head AND tail. The old code kept only the first 256 KB, which
         # silently lost the END of a long SSE stream — and the final chunks are
         # exactly where `usage` and `timings` live. A 1,000-token reasoning
@@ -441,17 +452,33 @@ class Tap(http.server.BaseHTTPRequestHandler):
         # upstream that dropped the connection, or a read timeout skipped
         # both, so the exchange vanished and the console showed it running
         # forever until the proxy was restarted.
+        # Initialised BEFORE the try, because the finally reads them. `seen`
+        # used to be assigned inside, after end_headers() — so a client that
+        # vanished while the head was being written made the finally raise
+        # UnboundLocalError and lose the record it existed to guarantee. A
+        # cleanup block may not depend on how far the body got.
         meta = None
+        seen = bytearray()
+        tail = bytearray()
+        overflowed = False
         try:
+            # The response head is sent INSIDE this block. It used to be sent
+            # above it, so a client that vanished during end_headers() raised
+            # before the cleanup existed: the in-flight entry stayed and the
+            # upstream response was never closed.
+            self.send_response(status)
+            for k, v in rhdrs.items():
+                if k.lower() not in ("transfer-encoding", "content-length",
+                                     "connection"):
+                    self.send_header(k, v)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
             ntok, last_pub = 0, 0.0
             # Decoded text so far, so a viewer can show the reply AS IT ARRIVES.
             # Records are only written when an exchange completes, so without this
             # the newest turn is invisible for as long as it takes to generate —
             # twenty seconds of nothing on a long reasoning reply.
             live_txt, live_think, sse_buf = "", "", ""
-            seen = bytearray()
-            tail = bytearray()
-            overflowed = False
             while True:
                 # read1, not read. BufferedReader.read(n) blocks until it
                 # has n bytes or hits EOF, so with small SSE events the proxy
@@ -564,6 +591,7 @@ class Tap(http.server.BaseHTTPRequestHandler):
             try:
                 resp.close()
             except Exception:
+                # resp may not even be bound if we never got that far.
                 pass
 
 

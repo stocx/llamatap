@@ -66,17 +66,24 @@ def load(path):
     return out
 
 
-def append_record(path, status, req, resp, meta, path_=None, **kw):
+def append_record(api_path, status, req, resp, meta, dest=None):
     """Append one replay exchange to a recording.
+
+    `api_path` is the endpoint; `dest` is the file. These were both called
+    `path` — one positional, one keyword — so the real call site raised
+    "got multiple values for argument 'path'" after every successful replay and
+    the answer was never saved. The unit test missed it by calling this helper
+    directly instead of driving the command, which is the whole point of
+    testing workflows.
 
     No cap on `resp`. There used to be a `[:262144]` slice here — the same one
     removed from the proxy, left behind in this file because nothing re-checked
     it. It cut the JSON mid-document, so a long generated file became
     unparsable and later readers lost the entire answer rather than its tail.
     """
-    dest = kw.get("path") or path_ or REC
+    dest = dest or REC
     line = json.dumps({"t": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                       "path": path, "status": status, "req": req,
+                       "path": api_path, "status": status, "req": req,
                        "meta": meta, "resp": resp}) + "\n"
     newfile = not os.path.exists(dest)
     with open(dest, "a") as f:
@@ -225,7 +232,7 @@ def main():
             meta["usage"], meta["timings"] = d.get("usage"), d.get("timings")
         except Exception:
             pass
-        append_record(rec.get("path"), status, body, resp, meta, path=a.file)
+        append_record(rec.get("path"), status, body, resp, meta, dest=a.file)
 
     if len(out) > 1:
         print(f"{C['hdr']}{' comparison ':=^{w}}{C['off']}")

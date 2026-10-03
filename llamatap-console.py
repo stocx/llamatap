@@ -166,6 +166,7 @@ HELP = [
     "r                tool-call arguments: raw JSON off the wire vs readable",
     "p                open or close the system prompt",
     "f                show or hide the launch settings in Model Details",
+    "t                fold the model's thinking to one line, or unfold it",
     "y                copy the whole scroll buffer to the clipboard",
     "/                command palette, filters as you type",
     "Esc              cancel — it does NOT quit",
@@ -188,6 +189,7 @@ COMMANDS = [
     ("preamble", "",                 "open or close the system prompt node"),
     ("flags",    "",                 "show or hide the launch settings in Model Details"),
     ("repeats",  "[open|close]",     "show re-sent messages as collapsed lines; open/close them all"),
+    ("thinking", "[open|close]",     "fold the model's thinking to one line; open/close them all"),
     ("name",     "<label>",          "override the detected harness name"),
     ("help",     "",                 "list these commands"),
     ("quit",     "",                 "exit llamatap console"),
@@ -690,6 +692,27 @@ class Console:
                 note += " · cached" if m.get("cached") else " · NOT cached, re-read"
                 self.emit_node(m.get("rec", 0), self.recs[m.get("rec", 0)], None,
                                "repeat", key, f"↻ {who}", note, 1, True, base=12)
+                continue
+
+            if kind == "thinking" and self.opts.get("fold_thinking"):
+                # Collapsed to one clickable row. The cost stays visible even
+                # when the text is hidden: a 1,370-token think is most of what
+                # a turn spent, and hiding that without saying so would make
+                # the thread look cheaper than it was.
+                key = f"{mi}"
+                self.node_bodies[("thinking", key)] = (m.get("text") or "").split("\n")
+                tok_ = m.get("tokens") or (m.get("chars", 0) // 4)
+                note = f"{tok_:,} tokens" if m.get("tokens") else f"~{tok_:,} tokens"
+                if m.get("secs") is not None:
+                    tilde = "~" if m.get("secs_estimated") else ""
+                    note += f" · {tilde}{m['secs']:.1f}s"
+                else:
+                    # Say it rather than omitting it. A row showing only tokens
+                    # looks like a thought that took no time.
+                    note += " · duration unknown"
+                self.emit_node(m.get("rec", 0), self.recs[m.get("rec", 0)], None,
+                               "thinking", key, f"💭 {who}", note, 1, True,
+                               base=12)
                 continue
             n = m.get("chars", 0)
             stat = f"{n:,} chars · ~{n//4:,} tokens"
@@ -1257,6 +1280,7 @@ class Console:
                else f"line {self.top+1}/{max(1, len(self.lines))}")
         bar = (f" tool calls {'RAW' if self.opts.get('rawjson') else 'readable'} │ "
                f"repeats {'SHOWN' if self.opts.get('repeats') else 'hidden'} │ "
+               f"thinking {'FOLDED' if self.opts.get('fold_thinking') else 'full'} │ "
                f"{pos} ")
         if self.busy:
             bar += f"│ {self.busy} "
@@ -1411,6 +1435,29 @@ class Console:
                 if not self.opts["repeats"]:
                     self.open = {n for n in self.open if n[1] != "repeat"}
                 self.rebuild()
+        elif c in ("thinking", "think"):
+            arg = (args[0].lower() if args else "")
+            if arg in ("open", "all", "expand"):
+                self.opts["fold_thinking"] = True
+                self.rebuild()
+                for (_l, _c0, _c1, nid) in self.hotspots:
+                    if nid[1] == "thinking":
+                        self.open.add(nid)
+                self.rebuild()
+                self.note("every thought expanded")
+            elif arg in ("close", "none", "collapse"):
+                self.opts["fold_thinking"] = True
+                self.open = {n for n in self.open if n[1] != "thinking"}
+                self.rebuild()
+                self.note("thinking folded to one line each")
+            else:
+                self.opts["fold_thinking"] = not self.opts.get("fold_thinking", False)
+                if not self.opts["fold_thinking"]:
+                    # Leaving folded mode, so the per-node open state is moot.
+                    self.open = {n for n in self.open if n[1] != "thinking"}
+                self.rebuild()
+                self.note("thinking folded — click a 💭 line to open one"
+                          if self.opts["fold_thinking"] else "thinking shown in full")
         elif c == "preamble":
             pre = [nid for (_l, _a, _b, nid) in self.hotspots if nid[1] == "preamble"]
             if not pre:
@@ -1787,6 +1834,8 @@ class Console:
                     self.run_cmd("preamble")
                 elif ch == ord("f"):
                     self.opts["flags"] = not self.opts["flags"]; self.rebuild()
+                elif ch == ord("t"):
+                    self.run_cmd("thinking")
                 elif ch == curses.KEY_RESIZE:
                     self.rebuild()
                 if self.top >= max(0, len(self.lines) - vh):
@@ -1833,6 +1882,8 @@ def main():
     ap.add_argument("--raw-json", action="store_true",
                     help="show tool-call arguments as raw JSON off the wire")
     ap.add_argument("--no-flags", action="store_true")
+    ap.add_argument("--fold-thinking", action="store_true",
+                    help="start with the model's thinking folded to one line")
     ap.add_argument("--repeats", action="store_true",
                     help="show every message each time the harness re-sent it")
     ap.add_argument("--name")
@@ -1847,6 +1898,9 @@ def main():
     # default, shown with /flags when you want to know how the server was told
     # to run.
     opts = {"rawjson": a.raw_json,
+            # Off by default: folding changes what the thread looks like, and
+            # the default should be "show me everything that happened".
+            "fold_thinking": a.fold_thinking,
             "preamble": a.preamble, "flags": False,
             "repeats": a.repeats}
 

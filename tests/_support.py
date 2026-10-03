@@ -23,7 +23,11 @@ import threading
 import types
 import unittest
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# LLAMATAP_TEST_ROOT lets the same tests run against a DIFFERENT copy of the
+# tree — which is how a regression test is shown failing against the commit
+# that had the bug, without touching the working tree.
+ROOT = os.environ.get("LLAMATAP_TEST_ROOT") or os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 
 
@@ -173,6 +177,10 @@ class MockUpstream:
                 # cheerful 200 hides exactly the bug being tested: props()
                 # trying the wrong route and appearing to succeed.
                 route = outer.routes.get(self.path) or outer.routes.get("*")
+                # gate_headers holds everything, including the status line, so
+                # a test can act while the client is blocked waiting for them.
+                if route and route.get("gate_headers") is not None:
+                    route["gate_headers"].wait(20)
                 if route is None:
                     msg = b'{"error":"no route in mock: ' + self.path.encode() + b'"}'
                     self.send_response(404)
@@ -196,6 +204,7 @@ class MockUpstream:
                 for i, c in enumerate(chunks):
                     if i == 1 and gate is not None:
                         gate.wait(10)
+                    _ = c
                     if route.get("chunked"):
                         self.wfile.write(b"%x\r\n%s\r\n" % (len(c), c))
                     else:

@@ -1,0 +1,90 @@
+name: tests
+
+# llamatap is standard-library only — "Python 3 and nothing else, no pip, no
+# venv" is a stated property of the project. So this workflow installs
+# nothing: if it ever needs a `pip install`, that property has been broken and
+# the build should be the thing that notices.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest supported through current. The tests bind ephemeral local
+        # ports and use only the standard library, so there is nothing to
+        # install on any of them.
+        python: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Confirm there is nothing to install
+        run: |
+          test ! -f requirements.txt
+          test ! -f pyproject.toml
+          test ! -f setup.py
+          python -c "import sys; print(sys.version)"
+
+      - name: Byte-compile every module
+        run: python -m compileall -q llamatap-*.py
+
+      - name: Check the dispatcher's shell syntax
+        run: bash -n llamatap
+
+      - name: Dispatcher runs without a config or a server
+        env:
+          HOME: ${{ runner.temp }}/fakehome
+        run: |
+          mkdir -p "$HOME"
+          ./llamatap --help > /dev/null
+          ./llamatap config
+          ./llamatap list || true
+
+      - name: Tests
+        # Every test uses its own temporary directory and a mock upstream on
+        # an ephemeral port. Nothing reaches the network, so a CI runner with
+        # no egress is fine.
+        run: python -m unittest discover -s tests -t tests -v
+
+      - name: State directory and recordings must be owner-only
+        run: |
+          export LLAMATAP_STATE="${{ runner.temp }}/state"
+          umask 022
+          ./llamatap config > /dev/null
+          mode=$(stat -c %a "$LLAMATAP_STATE")
+          echo "state dir mode: $mode"
+          test "$mode" = "700"
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    # Advisory, not blocking: shellcheck is not installed on the machine this
+    # was written on, so its result here is unverified. Make it blocking by
+    # deleting this line once a run has come back green.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck the dispatcher
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          # SC1090/SC1091: the config file is data read at runtime, not a
+          # sourced script, so there is nothing to follow.
+          shellcheck --severity=warning --exclude=SC1090,SC1091 llamatap

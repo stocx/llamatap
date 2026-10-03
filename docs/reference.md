@@ -36,7 +36,7 @@ else about its behaviour changes.
 | `llamatap replay N` | re-send exchange N, optionally to another model |
 | `llamatap log` | tail the one-line-per-request summary |
 | `llamatap clear` | archive, then start fresh |
-| `llamatap archive` | archive without clearing |
+| `llamatap archive` | copy the recording into runs/, leaving the live one alone |
 | `llamatap config` | resolved settings, and whether the server answers |
 
 Every one accepts `--file <path>` to open an archived session:
@@ -188,6 +188,7 @@ row and always shown; the two no longer share a toggle.
     r                tool-call arguments: raw JSON off the wire vs readable
     p                open or close the system prompt
     f                show or hide the launch settings in Model Details
+    t                fold the model's thinking to one line, or unfold it
     y                copy the whole scroll buffer to the clipboard
     /                command palette, filters as you type
     Esc              cancel — it does NOT quit
@@ -220,6 +221,7 @@ Tab completes, Enter runs, Esc cancels.
 | `/preamble` | open or close the system prompt node |
 | `/flags` | show or hide the launch settings in Model Details |
 | `/repeats [open\|close]` | show re-sent messages as collapsed lines; open or close them all |
+| `/thinking [open\|close]` | fold the model's thinking to one line; open or close them all |
 | `/name <label>` | override the detected harness name |
 | `/help` | list these commands and the keys |
 | `/quit` | exit |
@@ -255,6 +257,30 @@ turn.
 history has to go out every time or the model has no context. What the staircase
 shows is how much *context window* each turn consumes, not wasted compute —
 with the prefix cache working, re-sent tokens are nearly free to process.
+
+### Thinking
+
+A thinking block is routinely the largest part of a turn — 1,370 tokens and
+20 seconds in one measured case — so reading the conversation around one means
+scrolling past all of it. `/thinking` or `t` folds each to a single row:
+
+    + 💭 qwen3.5-35b-moe (thinking)   ~1,370 tokens · ~22.4s
+
+Same four states as repeats:
+
+| | |
+|---|---|
+| `/thinking` or `t` | folded ⇄ full. **Full is the default** |
+| `/thinking open` | folded, with every one expanded |
+| `/thinking close` | collapse them all again |
+| click a `💭` row | expand just that one |
+
+`--fold-thinking` starts the console folded.
+
+**Folding hides the text, never the cost.** A collapsed row always carries its
+tokens and its seconds, and when the duration cannot be derived it says
+`duration unknown` rather than showing tokens alone — a row with no time on it
+reads as a thought that was free.
 
 ---
 

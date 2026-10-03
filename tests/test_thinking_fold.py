@@ -1,0 +1,221 @@
+"""Folding the model's thinking to one line.
+
+A thinking block is often the largest part of a turn — 1,370 tokens and 20
+seconds in one measured case — and reading the conversation around it means
+scrolling past all of it. `/thinking` collapses each one to a single clickable
+row.
+
+The rule that matters: **folding hides the text, never the cost.** A collapsed
+row still states its tokens and its seconds, because a thread that looks
+cheaper than it was is a worse instrument than a verbose one.
+"""
+
+import json
+import os
+import unittest
+
+from _support import TapTest, load
+
+
+THINK = "Let me work through this.\n" * 40
+
+
+def rec_with_thinking(i=0, think=None, timings=True):
+    return {
+        "t": f"2026-10-02T12:00:{i:02d}",
+        "path": "/v1/chat/completions", "status": 200,
+        "req": {"model": "qwen", "messages": [
+            {"role": "system", "content": "be terse"},
+            {"role": "user", "content": "what is 2+2?"}]},
+        "resp": json.dumps({
+            "choices": [{"message": {"content": f"four ({i})",
+                                     "reasoning_content":
+                                         think or f"{THINK}step {i}\n"},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 300},
+            "timings": {"prompt_n": 50, "predicted_n": 300,
+                        "prompt_ms": 100.0, "predicted_ms": 4000.0,
+                        "prompt_per_second": 500.0,
+                        "predicted_per_second": 75.0}}),
+        "meta": {"usage": {"prompt_tokens": 50, "completion_tokens": 300},
+                 "timings": {"prompt_n": 50, "predicted_n": 300,
+                             "prompt_ms": 100.0, "predicted_ms": 4000.0,
+                             "prompt_per_second": 500.0,
+                             "predicted_per_second": 75.0,
+                             "predicted_per_token_ms": 13.3},
+                 "elapsed_ms": 4200}}
+
+
+class ThinkingFold(TapTest):
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def console(self, fold=False, cols=140, rows=40):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (rows, cols)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen()
+        # Distinct content per record: identical messages are correctly
+        # deduplicated as repeats, which would hide the second thought.
+        c.recs = [rec_with_thinking(0), rec_with_thinking(1)]
+        c.name = None
+        c.extra = []
+        c.follow = True
+        c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": fold}
+        c.open = set()
+        c.hover = None
+        c.hotspots = []
+        c.starts = []
+        c.menu = []
+        c.detail = None
+        c.node_bodies = {}
+        c.inflight = []
+        c.msg = ""
+        c.msg_until = 0
+        c.tick = 0
+        c._flags = ""
+        c._flags_started = True
+        c._flags_err = ""
+        c._flags_src = "running"
+        c._flags_age = None
+        c._rec_name = {}
+        c.rebuild()
+        return c
+
+    def text_of(self, c):
+        return "\n".join(
+            "".join(ch for _, ch, _ in spans) for spans in c.lines)
+
+    def test_unfolded_shows_the_thinking_text(self):
+        self.assertIn("Let me work through this", self.text_of(self.console()))
+
+    def test_folded_hides_the_text(self):
+        body = self.text_of(self.console(fold=True))
+        self.assertNotIn("Let me work through this", body,
+                         "the thinking text is still on screen when folded")
+
+    def test_folded_is_shorter(self):
+        self.assertLess(len(self.console(fold=True).lines),
+                        len(self.console().lines),
+                        "folding did not save any rows")
+
+    def test_folded_still_states_the_cost(self):
+        """The point of the collapsed row."""
+        body = self.text_of(self.console(fold=True))
+        self.assertIn("💭", body, "no folded thinking row at all")
+        row = next(l for l in body.split("\n") if "💭" in l)
+        self.assertIn("tokens", row, f"no token count on the folded row: {row!r}")
+        self.assertRegex(row, r"\d+\.\d+s|\d+s",
+                         f"no duration on the folded row: {row!r}")
+
+    def test_an_unknown_duration_is_stated_not_omitted(self):
+        """A row with only a token count looks like a thought that was free."""
+        C = self.C
+        rec = rec_with_thinking(0)
+        rec["meta"]["timings"].pop("predicted_per_token_ms", None)
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [rec]; c.name = None; c.extra = []
+        c.follow = True; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True}
+        c.open = set(); c.hover = None; c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}; c.inflight = []
+        c.msg = ""; c.msg_until = 0; c.tick = 0
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        row = next((l for l in self.text_of(c).split("\n") if "💭" in l), "")
+        self.assertTrue("s" in row.split("tokens")[-1] or "unknown" in row,
+                        f"neither a duration nor a reason for its absence: {row!r}")
+
+    def test_each_one_is_individually_expandable(self):
+        c = self.console(fold=True)
+        nodes = [nid for (_l, _a, _b, nid) in c.hotspots if nid[1] == "thinking"]
+        self.assertEqual(len(nodes), 2,
+                         f"expected one node per thinking block, got {nodes}")
+        self.assertEqual(len(set(nodes)), 2, "the nodes are not distinct")
+
+        c.open.add(nodes[0])
+        c.rebuild()
+        body = self.text_of(c)
+        self.assertIn("Let me work through this", body,
+                      "opening one node did not reveal its text")
+        # and the other is still shut
+        self.assertEqual(
+            sum(1 for l in body.split("\n") if l.strip().startswith("+ 💭")
+                or "+ 💭" in l), 1,
+            "the second thought did not stay folded")
+
+    def test_open_all_then_close_all(self):
+        c = self.console(fold=True)
+        c.run_cmd("thinking open")
+        self.assertIn("Let me work through this", self.text_of(c))
+        c.run_cmd("thinking close")
+        self.assertNotIn("Let me work through this", self.text_of(c))
+        self.assertIn("💭", self.text_of(c), "the folded rows disappeared")
+
+    def test_the_bare_command_toggles(self):
+        c = self.console(fold=False)
+        c.run_cmd("thinking")
+        self.assertTrue(c.opts["fold_thinking"])
+        self.assertNotIn("Let me work through this", self.text_of(c))
+        c.run_cmd("thinking")
+        self.assertFalse(c.opts["fold_thinking"])
+        self.assertIn("Let me work through this", self.text_of(c))
+
+    def test_leaving_fold_mode_forgets_node_state(self):
+        c = self.console(fold=True)
+        c.run_cmd("thinking open")
+        c.run_cmd("thinking")          # unfold entirely
+        self.assertFalse(any(n[1] == "thinking" for n in c.open),
+                         "stale thinking nodes left in the open set")
+
+    def test_the_command_is_listed(self):
+        names = [n for n, _, _ in self.C.COMMANDS]
+        self.assertIn("thinking", names)
+
+    def test_the_key_is_documented(self):
+        keys = "\n".join(self.C.HELP)
+        self.assertIn("t ", keys, "the t key is not in the help")
+
+    def test_status_bar_says_which_mode(self):
+        for fold, word in ((True, "FOLDED"), (False, "full")):
+            with self.subTest(fold=fold):
+                c = self.console(fold=fold)
+                c.scr.getmaxyx()
+                self.assertTrue(hasattr(c, "opts"))
+                self.assertEqual(c.opts["fold_thinking"], fold)
+
+    def test_folding_leaves_everything_else_alone(self):
+        """Replies, tool calls and the user's own words must still show."""
+        body = self.text_of(self.console(fold=True))
+        self.assertIn("what is 2+2?", body)
+        self.assertIn("four", body)
+
+    def test_dashboard_still_aligns_when_folded(self):
+        for cols in (90, 118, 160):
+            with self.subTest(cols=cols):
+                c = self.console(fold=True, cols=cols)
+                widths = set()
+                for spans, _ in c.dash(cols):
+                    t = ("".join(x for x, _ in spans)
+                         if isinstance(spans, list) else spans)
+                    widths.add(self.C.dwidth(t))
+                self.assertEqual(len(widths), 1, f"ragged border: {widths}")
+
+
+if __name__ == "__main__":
+    unittest.main()

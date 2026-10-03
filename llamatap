@@ -100,7 +100,7 @@ usage: llamatap <command> [options]
   replay N         re-send exchange N, optionally to a different model
   log              tail the one-line-per-request summary log
   clear            archive the recording, then start a fresh one
-  archive          archive the recording without clearing it
+  archive          copy the recording into runs/, leaving the live one alone
   config           print the resolved settings and where each came from
 
 where the model is
@@ -187,7 +187,10 @@ case "$cmd" in
   log)    exec tail -f "$LLAMATAP_LOG" ;;
   config|settings) show_config ;;
   archive)
-    "$B/llamatap-archive.py" --runs "$LLAMATAP_RUNS" "$LLAMATAP_REC" "$LLAMATAP_LOG"
+    # --keep COPIES. Without it this moved the live files, so a command whose
+    # help says "without clearing" cleared.
+    "$B/llamatap-archive.py" --runs "$LLAMATAP_RUNS" --keep \
+      "$LLAMATAP_REC" "$LLAMATAP_LOG"
     ;;
   clear)
     # Archive FIRST, and truncate only if that succeeded. This used to be a
@@ -196,7 +199,12 @@ case "$cmd" in
     # destroyed the only copy of a result.
     if dest="$("$B/llamatap-archive.py" --runs "$LLAMATAP_RUNS" \
                  "$LLAMATAP_REC" "$LLAMATAP_LOG")"; then
-      : > "$LLAMATAP_LOG"; : > "$LLAMATAP_REC"
+      # Recreate privately. A bare `: > file` creates 0644 under the usual
+      # umask of 022, and the proxy sets its mode only at CREATION — so an
+      # already-existing 0644 recording stayed world-readable for the whole
+      # next session. umask in a subshell sets the mode as the file is made,
+      # leaving no window where it exists and is readable.
+      ( umask 077; : > "$LLAMATAP_LOG"; : > "$LLAMATAP_REC" )
       if [ "$dest" = "nothing to archive" ]; then
         echo "recording was already empty"
       else

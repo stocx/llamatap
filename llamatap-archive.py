@@ -21,16 +21,24 @@ Two rules, both paid for:
 Run directly, it prints the destination on success and exits non-zero on
 failure, so a shell caller can gate on it:
 
-    llamatap-archive.py --runs DIR FILE [FILE ...]
+    llamatap-archive.py --runs DIR [--keep] FILE [FILE ...]
+
+`--keep` copies instead of moving, leaving the live recording alone.
 """
 
 import os
+import shutil
 import sys
 import time
 
 
-def archive(paths, runs_dir, stamp=None):
-    """Move each existing non-empty path into a fresh directory under runs_dir.
+def archive(paths, runs_dir, stamp=None, keep=False):
+    """Put each existing non-empty path into a fresh directory under runs_dir.
+
+    `keep=False` moves (what `clear` and `serve` want: the recording is about
+    to be replaced). `keep=True` COPIES, leaving the live recording in place —
+    which is what a bare `llamatap archive` promises, and what it did not do:
+    it moved the files, so "archive without clearing" silently cleared.
 
     Returns the destination directory, or None if there was nothing to do.
     Raises on failure — the caller must not truncate anything after an
@@ -47,7 +55,13 @@ def archive(paths, runs_dir, stamp=None):
             # Two sources with the same basename; keep both rather than
             # letting one quietly win.
             target = _unique_file(target)
-        os.replace(p, target)
+        if keep:
+            # Copy with the mode carried over, so an archived recording is no
+            # more readable than the live one.
+            shutil.copy2(p, target)
+            os.chmod(target, 0o600)
+        else:
+            os.replace(p, target)
     return dest
 
 
@@ -79,19 +93,22 @@ def _unique_file(path):
 
 def main(argv):
     runs = None
+    keep = False
     files = []
     it = iter(argv)
     for a in it:
         if a == "--runs":
             runs = next(it, None)
+        elif a == "--keep":
+            keep = True
         else:
             files.append(a)
     if not runs:
-        print("usage: llamatap-archive.py --runs DIR FILE [FILE ...]",
+        print("usage: llamatap-archive.py --runs DIR [--keep] FILE [FILE ...]",
               file=sys.stderr)
         return 2
     try:
-        dest = archive(files, runs)
+        dest = archive(files, runs, keep=keep)
     except Exception as e:
         print(f"could not archive: {e}", file=sys.stderr)
         return 1

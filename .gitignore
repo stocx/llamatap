@@ -11,3 +11,7 @@ __pycache__/
 *.pyc
 *.bak
 *.bak-*
+
+# Harness test output. Driving a harness with this repo as its working
+# directory leaves its scratch work here; it is evidence, not source.
+hello_world_test/
