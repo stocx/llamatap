@@ -75,10 +75,9 @@ jobs:
 
   shellcheck:
     runs-on: ubuntu-latest
-    # Advisory, not blocking: shellcheck is not installed on the machine this
-    # was written on, so its result here is unverified. Make it blocking by
-    # deleting this line once a run has come back green.
-    continue-on-error: true
+    # Blocking: verified green on run 37081878922. It was advisory until then
+    # only because shellcheck is not installed on the machine this was written
+    # on, and an unverified gate is worse than none.
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck the dispatcher
