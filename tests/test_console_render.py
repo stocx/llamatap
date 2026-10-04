@@ -2422,6 +2422,16 @@ class InFlightHoldsItsPlace(TapTest):
         self.assertIn("39,747", row, "its size is not stated")
         self.assertIn("prefill", row, "its state is not stated")
 
+    def test_a_blank_line_separates_the_placeholder_from_the_reply(self):
+        """It is a block like any other and gets the same gap. Without it the
+        model's live rows ran straight into the request row above them."""
+        c = self.console({"model": "qwen", "req_bytes": 100,
+                          "state": "decoding", "text": "partial answer"})
+        rows = self.rows(c)
+        i = next(i for i, l in enumerate(rows) if "bytes ·" in l)
+        self.assertEqual(rows[i + 1].strip(), "",
+                         f"no gap under the placeholder: {rows[i + 1]!r}")
+
     def test_the_request_is_above_the_reply(self):
         """The whole point: the request came first, so it must look it."""
         c = self.console({"model": "qwen", "req_bytes": 100,
@@ -2453,24 +2463,37 @@ class InFlightHoldsItsPlace(TapTest):
         c.rebuild()
         self.assertNotEqual(first, self.live_row(c), "the spinner is frozen")
 
-    def test_the_spinner_frames_are_all_one_cell(self):
-        """A frame wider than one cell makes the row jitter as it animates."""
-        for frame in self.C.SPIN:
-            with self.subTest(frame=frame):
-                self.assertEqual(self.C.dwidth(frame), 1,
-                                 f"{frame!r} is not one cell wide")
+    def test_every_frame_is_the_same_width(self):
+        """Frames of different widths make the row jitter as it animates.
+        The width itself is free — the default is two cells — but it must not
+        change between frames."""
+        widths = {self.C.dwidth(f) for f in self.C.SPIN}
+        self.assertEqual(len(widths), 1,
+                         f"the spinner changes width as it turns: {widths}")
 
-    def test_the_spinner_fills_its_cell(self):
-        """Width alone cannot express this: a braille frame is also one cell
-        wide, and it was the one that read as a narrow rectangle, because a
-        braille cell is two dots across and four tall. The rule actually
-        applied is that the frames come from Block Elements — the same family
-        as the accent bar — so each one paints the full cell."""
+    def test_the_spinner_dots_form_a_square_grid(self):
+        """A braille cell is 2 dots wide and 4 tall, so ONE cell can never be
+        square: confining the dots to the middle rows squares the shape but
+        makes it 2x2, which is too small to read. Two cells side by side are
+        4 dots across and 4 tall — and since a terminal cell is roughly twice
+        as tall as it is wide, two of them is square on screen too.
+        """
         for frame in self.C.SPIN:
             with self.subTest(frame=frame):
-                self.assertTrue(0x2580 <= ord(frame) <= 0x259F,
-                                f"{frame!r} is not a block element; a braille "
-                                f"or dot spinner reads as a thin rectangle")
+                for c in frame:
+                    self.assertTrue(0x2800 <= ord(c) <= 0x28FF,
+                                    f"{c!r} is not braille")
+                self.assertEqual(len(frame), 2,
+                                 f"{frame!r} is not a 4-dot-wide grid: one "
+                                 f"cell is 2x4 and three or more is wider "
+                                 f"than it is tall")
+
+    def test_the_spinner_actually_moves_around_the_square(self):
+        """Four identical frames would also satisfy the formation rule."""
+        self.assertEqual(len(set(self.C.SPIN)), len(self.C.SPIN),
+                         "the spinner repeats a frame")
+        self.assertGreaterEqual(len(self.C.SPIN), 3,
+                                "too few frames to read as rotation")
 
     def test_the_placeholder_is_counted_as_live(self):
         """`to_bottom()` follows the stream by this measurement."""

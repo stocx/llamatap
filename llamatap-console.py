@@ -105,10 +105,22 @@ INFLIGHT = os.environ.get("LLAMATAP_INFLIGHT",
 # Braille spinners look great in screenshots and render as mush in plenty of
 # terminal fonts — it came out as ".:" here. ASCII always works; override with
 # LLAMATAP_SPINNER if your font handles something nicer.
-# A braille cell is two dots wide and four tall, so a braille spinner reads as
-# a narrow rectangle flickering in place. These are the same Block Elements
-# family as the accent bar, and each frame fills the cell squarely.
-SPIN = os.environ.get("LLAMATAP_SPINNER", "▌▀▐▄")
+# Braille dots on a SQUARE grid, which takes two cells.
+#
+# One braille cell is two dots wide and four tall, so any single-cell spinner
+# is a tall thin rectangle however its dots are arranged — and confining it to
+# the middle rows to square it up just makes it small. Two cells side by side
+# give a 4x4 dot grid, and since a terminal cell is roughly twice as tall as
+# it is wide, two of them is also square ON SCREEN.
+#
+# The frames are a line rotating through the centre of that grid: horizontal,
+# down-right, vertical, down-left.
+#
+# A frame is a STRING, not a character — set LLAMATAP_SPINNER to a run of
+# single characters if your font handles those better, and each one becomes a
+# frame.
+_SPIN_ENV = os.environ.get("LLAMATAP_SPINNER")
+SPIN = tuple(_SPIN_ENV) if _SPIN_ENV else ("⠒⠤", "⠑⢄", "⠘⡄", "⡠⠊")
 
 #: Every block starts hard against the left edge. A two-column margin made the
 #: accent bars look indented rather than justified, and it is two columns off
@@ -1265,6 +1277,10 @@ class Console:
             lbl = f"{' ' * LEFT}{hname} → sending {sp}"
             gap = " " * max(2, W - dwidth(lbl) - dwidth(waited) - 3)
             self.emit(f"{C_DIM}{lbl}{C_OFF}{gap}{C_DIM}{waited}{C_OFF}")
+            # The placeholder is its own block and gets the gap every other
+            # block has. Without it the model's live rows ran straight into
+            # the request row above them.
+            self.emit("")
 
             think, text = job.get("thinking") or "", job.get("text") or ""
             if think and not text:
