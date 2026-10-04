@@ -49,8 +49,13 @@ def _publish():
     try:
         tmp = INFLIGHT + ".tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # Each entry carries the publishing proxy's pid, so a reader can tell
+        # a request that is still running from one whose proxy died. Without
+        # it a killed proxy leaves its last entry in the file for ever and the
+        # console shows a spinner that will never stop.
+        out = [dict(j, pid=os.getpid()) for j in _active.values()]
         with os.fdopen(fd, "w") as f:
-            json.dump(list(_active.values()), f)
+            json.dump(out, f)
         os.replace(tmp, INFLIGHT)      # atomic: a reader never sees half a file
     except Exception:
         pass

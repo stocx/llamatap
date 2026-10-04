@@ -514,12 +514,36 @@ def clipboard(text):
     return None
 
 
+def _alive(pid):
+    """Is that process still running? Exact, not a timeout."""
+    if not isinstance(pid, int) or pid <= 0:
+        return True          # published by an older proxy; assume live
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # exists, owned by someone else
+    except Exception:
+        return True
+    return True
+
+
 def read_inflight():
-    """Requests currently in flight, as published by the proxy."""
+    """Requests currently in flight, as published by the proxy.
+
+    Entries whose proxy is gone are dropped. A killed or crashed proxy used to
+    leave its last entry in the file for ever, and the console then showed a
+    spinner for a request that had finished — or never would. Checking the pid
+    is exact; a staleness timeout would have had to guess how long a legitimate
+    prefill may be, and a 60-second prefill is not unusual here.
+    """
     try:
         with open(INFLIGHT) as f:
             d = json.load(f)
-        return d if isinstance(d, list) else []
+        if not isinstance(d, list):
+            return []
+        return [j for j in d if isinstance(j, dict) and _alive(j.get("pid"))]
     except Exception:
         return []
 
@@ -1259,7 +1283,24 @@ class Console:
         # last completed exchange's header.
         live_from = len(self.lines)
         hname = parties.get("harness") or "harness"
+        # What the model has already said in a COMPLETED record. The proxy
+        # writes the record and clears the in-flight entry as two steps, and
+        # the console polls each on its own timer, so for a moment — longer if
+        # a poll is missed — the same reply was drawn twice: once as a
+        # finished block and again underneath it with a spinner still turning.
+        # No empty-string guard here: `conversation()` never emits a model
+        # message with empty text, and the `said and ...` test below
+        # short-circuits anyway. A filter for a case that cannot arise is the
+        # dead code this project keeps finding in review.
+        done = {(m.get("text") or "").strip()
+                for m in msgs if m.get("who") == "model"}
         for job in (self.inflight or []):
+            # Checked BEFORE the placeholder is drawn: if the reply is already
+            # a finished block then nothing is in flight, so the "sending"
+            # row is a ghost too.
+            said = (job.get("text") or job.get("thinking") or "").strip()
+            if said and said in done:
+                continue
             sp = SPIN[self.tick % len(SPIN)]
             mdl = job.get("model") or model
             # The REQUEST half of an exchange, held in place while it is in

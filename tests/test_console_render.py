@@ -2589,3 +2589,112 @@ class BlocksStartAtTheLeftEdge(TapTest):
         """Everything downstream reads HEADER_H, so the rule must be inside
         it — otherwise the first transcript row lands under the rule."""
         self.assertGreaterEqual(self.C.HEADER_H, 2)
+
+
+class LiveBlockDoesNotDuplicate(TapTest):
+    """A finished reply was drawn twice: once as a completed block, and again
+    below it with a spinner still turning.
+
+    The proxy writes the record and clears the in-flight entry as two steps,
+    and the console polls each on its own timer, so there is always a window
+    where both exist. A killed proxy widened that window to for ever.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def console(self, job):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(0)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = [job] if job else []
+        c.msg = ""; c.msg_until = 0; c.tick = 0; c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        return c
+
+    def rows(self, c):
+        return ["".join(ch for _, ch, _ in s).rstrip() for s in c.lines]
+
+    def test_a_reply_already_recorded_is_not_drawn_again(self):
+        c = self.console({"model": "qwen", "req_bytes": 10,
+                          "state": "decoding", "text": "reply 0"})
+        hits = [l for l in self.rows(c) if "reply 0" in l]
+        self.assertEqual(len(hits), 1,
+                         f"the finished reply is on screen twice: {hits}")
+        self.assertEqual(c._live_lines, 0,
+                         "a live block was drawn for a finished reply")
+
+    def test_a_genuinely_new_reply_is_still_drawn(self):
+        c = self.console({"model": "qwen", "req_bytes": 10,
+                          "state": "decoding", "text": "something new"})
+        self.assertTrue(any("something new" in l for l in self.rows(c)),
+                        "suppression swallowed a live reply")
+        self.assertGreater(c._live_lines, 0)
+
+    def test_whitespace_does_not_defeat_the_match(self):
+        c = self.console({"model": "qwen", "req_bytes": 10,
+                          "state": "decoding", "text": "  reply 0\n"})
+        hits = [l for l in self.rows(c) if "reply 0" in l]
+        self.assertEqual(len(hits), 1, f"duplicated via whitespace: {hits}")
+
+
+class InFlightLiveness(TapTest):
+    """An entry whose proxy is gone is not in flight."""
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def test_a_dead_proxy_s_entry_is_dropped(self):
+        import os as _os
+        self.assertFalse(self.C._alive(_os.getpid() and 999_999_000))
+
+    def test_this_process_counts_as_alive(self):
+        import os as _os
+        self.assertTrue(self.C._alive(_os.getpid()))
+
+    def test_an_entry_with_no_pid_is_kept(self):
+        """Published by an older proxy; dropping it would hide live traffic."""
+        self.assertTrue(self.C._alive(None))
+        self.assertTrue(self.C._alive(0))
+
+    def test_a_dead_proxy_s_entry_is_filtered_out_of_the_file(self):
+        """`_alive` alone proves nothing — read_inflight has to use it."""
+        import json as _j
+        C = self.C
+        with open(C.INFLIGHT, "w") as f:
+            _j.dump([{"model": "qwen", "text": "ghost", "pid": 999_999_000},
+                     {"model": "qwen", "text": "real", "pid": os.getpid()}], f)
+        got = C.read_inflight()
+        self.assertEqual([j["text"] for j in got], ["real"],
+                         "a dead proxy's entry survived the read")
+
+    def test_a_file_with_no_pids_is_read_unchanged(self):
+        """Written by an older proxy; dropping those would hide live traffic."""
+        import json as _j
+        C = self.C
+        with open(C.INFLIGHT, "w") as f:
+            _j.dump([{"model": "qwen", "text": "legacy"}], f)
+        self.assertEqual([j["text"] for j in C.read_inflight()], ["legacy"])
+
+    def test_a_missing_or_broken_file_is_empty_not_an_error(self):
+        C = self.C
+        with open(C.INFLIGHT, "w") as f:
+            f.write("{ not json")
+        self.assertEqual(C.read_inflight(), [])
+        os.remove(C.INFLIGHT)
+        self.assertEqual(C.read_inflight(), [])
