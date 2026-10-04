@@ -263,7 +263,7 @@ HELP = [
     "G                jump to the newest message and follow new ones",
     "click a node row expand or collapse it — anywhere on the line",
     "x                number the expandable nodes, then press 1-9 to toggle",
-    "o / O            expand all in this exchange / collapse everything",
+    "o                expand or collapse everything in this exchange",
     "r                tool-call arguments: raw JSON off the wire vs readable",
     "p                open or close the system prompt",
     "f                show or hide the launch settings in Model Details",
@@ -1925,7 +1925,7 @@ class Console:
             # at the terminal width, and `q quit` used to sit at the very end
             # where it was the first thing lost on an 80-column window.
             hint = self.msg or (" / commands  ·  q quit  ·  jk gg G scroll  ·  "
-                                "click a row to expand  ·  x list  ·  o/O all  ·  "
+                                "click a row to expand  ·  x list  ·  o all  ·  "
                                 "r raw json  ·  p system prompt  ·  y copy ")
             try:
                 scr.addnstr(H - 1, 0, hint.ljust(W - 1), W - 1,
@@ -2510,14 +2510,21 @@ class Console:
                     n = ch - 48
                     if n <= len(self.menu):
                         self.toggle(self.menu[n - 1])
-                elif ch == ord("o"):
-                    # expand everything in the exchange you are looking at
+                elif ch in (ord("o"), ord("O")):
+                    # One key that toggles. Two keys differing only by shift,
+                    # one expanding the current exchange and the other
+                    # collapsing the whole buffer, were neither symmetrical
+                    # nor memorable — you could not undo `o` with `o`.
                     self.expand_menu()
-                    for nid in self.menu:
-                        self.open.add(nid)
+                    if any(nid in self.open for nid in self.menu):
+                        for nid in self.menu:
+                            self.open.discard(nid)
+                        self.note("collapsed this exchange")
+                    else:
+                        for nid in self.menu:
+                            self.open.add(nid)
+                        self.note("expanded this exchange")
                     self.rebuild()
-                elif ch == ord("O"):
-                    self.open.clear(); self.rebuild()
                 elif ch == ord("y"):
                     self.cmd_copy([])
                 elif ch == ord("p"):

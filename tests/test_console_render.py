@@ -1744,3 +1744,67 @@ class PaletteSelection(TapTest):
         hit = [ch for row in self.palette()
                for ch, attr in row if attr & rev and ch.strip()]
         self.assertTrue(hit, "no row is highlighted at all")
+
+
+class ExpandToggle(TapTest):
+    """`o` expands and collapses. It used to be `o` to expand this exchange
+    and `O` to collapse everything — two keys differing only by shift, doing
+    asymmetric things, so `o` could not be undone with `o`."""
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def console(self):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(i) for i in range(3)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": False, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.msg = ""; c.msg_until = 0; c.tick = 0
+        c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        return c
+
+    def press_o(self, c):
+        """What the key handler does, without driving the event loop."""
+        c.expand_menu()
+        if any(nid in c.open for nid in c.menu):
+            for nid in c.menu:
+                c.open.discard(nid)
+        else:
+            for nid in c.menu:
+                c.open.add(nid)
+        c.rebuild()
+
+    def test_it_toggles_back_and_forth(self):
+        c = self.console()
+        shut = len(c.lines)
+        self.press_o(c)
+        opened = len(c.lines)
+        self.assertGreater(opened, shut, "`o` did not expand anything")
+        self.press_o(c)
+        self.assertEqual(len(c.lines), shut,
+                         "`o` did not collapse back to where it started")
+        self.press_o(c)
+        self.assertEqual(len(c.lines), opened, "the toggle is not repeatable")
+
+    def test_the_capital_is_the_same_key(self):
+        src = open(os.path.join(ROOT, "llamatap-console.py")).read()
+        self.assertIn('ch in (ord("o"), ord("O"))', src,
+                      "O is not routed to the same toggle")
+
+    def test_the_help_no_longer_advertises_two_keys(self):
+        for line in self.C.HELP:
+            self.assertNotIn("o / O", line, "the help still lists o / O")
