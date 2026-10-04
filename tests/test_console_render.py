@@ -14,6 +14,7 @@ and would be easy to break silently:
 """
 
 import json
+import re
 import os
 import unittest
 
@@ -2591,13 +2592,13 @@ class BlocksStartAtTheLeftEdge(TapTest):
         self.assertGreaterEqual(self.C.HEADER_H, 2)
 
 
-class LiveBlockDoesNotDuplicate(TapTest):
-    """A finished reply was drawn twice: once as a completed block, and again
-    below it with a spinner still turning.
+class LiveBlockIsNotTextMatched(TapTest):
+    """A duplicate on screen means a STALE in-flight entry, not an overlap.
 
-    The proxy writes the record and clears the in-flight entry as two steps,
-    and the console polls each on its own timer, so there is always a window
-    where both exist. A killed proxy widened that window to for ever.
+    The proxy clears the entry before it writes the record, so the normal path
+    shows a brief gap, never both at once. The fix is the pid check that drops
+    entries whose proxy is gone — not comparing text, which would hide the
+    live view of any reply that repeats.
     """
 
     def setUp(self):
@@ -2629,14 +2630,23 @@ class LiveBlockDoesNotDuplicate(TapTest):
     def rows(self, c):
         return ["".join(ch for _, ch, _ in s).rstrip() for s in c.lines]
 
-    def test_a_reply_already_recorded_is_not_drawn_again(self):
+    def test_a_live_reply_matching_an_earlier_one_is_still_drawn(self):
+        """The regression a text-matching fix would have caused.
+
+        The proxy clears the in-flight entry BEFORE writing the record, so the
+        normal path never shows both at once. Suppressing a live block because
+        its text appears in a finished one would therefore fix nothing, while
+        hiding the live view of any reply that repeats — a short "Hello! How
+        can I help?", or a title generator asked the same thing twice.
+        """
         c = self.console({"model": "qwen", "req_bytes": 10,
                           "state": "decoding", "text": "reply 0"})
+        self.assertGreater(c._live_lines, 0,
+                           "a repeated reply lost its live view")
         hits = [l for l in self.rows(c) if "reply 0" in l]
-        self.assertEqual(len(hits), 1,
-                         f"the finished reply is on screen twice: {hits}")
-        self.assertEqual(c._live_lines, 0,
-                         "a live block was drawn for a finished reply")
+        self.assertEqual(len(hits), 2,
+                         "the finished block and the live one should both be "
+                         f"present while it streams: {hits}")
 
     def test_a_genuinely_new_reply_is_still_drawn(self):
         c = self.console({"model": "qwen", "req_bytes": 10,
@@ -2645,11 +2655,27 @@ class LiveBlockDoesNotDuplicate(TapTest):
                         "suppression swallowed a live reply")
         self.assertGreater(c._live_lines, 0)
 
-    def test_whitespace_does_not_defeat_the_match(self):
-        c = self.console({"model": "qwen", "req_bytes": 10,
-                          "state": "decoding", "text": "  reply 0\n"})
-        hits = [l for l in self.rows(c) if "reply 0" in l]
-        self.assertEqual(len(hits), 1, f"duplicated via whitespace: {hits}")
+    def test_the_proxy_clears_before_it_records(self):
+        """The property the console relies on, asserted where it lives: if
+        this order ever flips, both halves are on screen at once and the
+        console has no way to tell."""
+        src = open(os.path.join(ROOT, "llamatap-proxy.py")).read()
+        # Every call that writes a record, with the text before it. The first
+        # version sliced from the FIRST `finally:` in the file, which is not
+        # the one on the streaming path — so moving the clear below the record
+        # changed nothing it looked at.
+        calls = [m.start() for m in re.finditer(r"\brecord\(self\.path", src)]
+        self.assertTrue(calls, "no record() call found in the proxy")
+        for pos in calls:
+            # the clear that pairs with this record is the nearest one above it
+            before = src[:pos]
+            self.assertIn("inflight_clear", before,
+                          "a record is written with no clear before it")
+            gap = before[before.rindex("inflight_clear"):]
+            self.assertLess(
+                gap.count("\n"), 12,
+                "the nearest inflight_clear is too far above this record to "
+                "be its pair — the order may have been changed:\n" + gap[:300])
 
 
 class InFlightLiveness(TapTest):
