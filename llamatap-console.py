@@ -105,24 +105,22 @@ INFLIGHT = os.environ.get("LLAMATAP_INFLIGHT",
 # Braille spinners look great in screenshots and render as mush in plenty of
 # terminal fonts — it came out as ".:" here. ASCII always works; override with
 # LLAMATAP_SPINNER if your font handles something nicer.
-# Braille dots on a SQUARE grid, which takes two cells.
+# A rotating arc of braille dots, in ONE cell.
 #
-# One braille cell is two dots wide and four tall, so any single-cell spinner
-# is a tall thin rectangle however its dots are arranged — and confining it to
-# the middle rows to square it up just makes it small. Two cells side by side
-# give a 4x4 dot grid, and since a terminal cell is roughly twice as tall as
-# it is wide, two of them is also square ON SCREEN.
+# Braille offers exactly two sizes and nothing between them. One cell is two
+# dots wide and four tall, so the arc travels round a slightly tall rectangle.
+# Two cells give a 4x4 grid that is genuinely square, and is too big. There is
+# no middle: dots come in whole cells.
 #
-# The frames are the same rotating arc the single-cell spinner had — a thick
-# segment travelling round the perimeter — just drawn on a grid big enough to
-# be square. Eight frames, six of the twelve border dots lit at a time.
+# So: one cell, and the shape is what braille is. The alternative is to stop
+# rotating anything — opencode shows a 1x8 row of U+2022 bullets with a
+# travelling highlight, which has no grid to be square or not. That is a
+# different idiom, not a smaller version of this one.
 #
-# A frame is a STRING, not a character — set LLAMATAP_SPINNER to a run of
-# single characters if your font handles those better, and each one becomes a
-# frame.
+# A frame is a STRING, not a character, so a multi-cell spinner stays possible;
+# set LLAMATAP_SPINNER to a run of single characters to replace these.
 _SPIN_ENV = os.environ.get("LLAMATAP_SPINNER")
-SPIN = tuple(_SPIN_ENV) if _SPIN_ENV else (
-    "⠉⠹", "⠀⣹", "⢀⣸", "⣀⣰", "⣆⣀", "⣏⠀", "⡏⠁", "⠏⠉")
+SPIN = tuple(_SPIN_ENV) if _SPIN_ENV else tuple("⠏⠛⠹⢸⣰⣤⣆⡇")
 
 #: Every block starts hard against the left edge. A two-column margin made the
 #: accent bars look indented rather than justified, and it is two columns off

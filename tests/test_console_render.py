@@ -2471,22 +2471,20 @@ class InFlightHoldsItsPlace(TapTest):
         self.assertEqual(len(widths), 1,
                          f"the spinner changes width as it turns: {widths}")
 
-    def test_the_spinner_dots_form_a_square_grid(self):
-        """A braille cell is 2 dots wide and 4 tall, so ONE cell can never be
-        square: confining the dots to the middle rows squares the shape but
-        makes it 2x2, which is too small to read. Two cells side by side are
-        4 dots across and 4 tall — and since a terminal cell is roughly twice
-        as tall as it is wide, two of them is square on screen too.
+    def test_the_spinner_is_braille(self):
+        """Deliberately NOT asserting a square grid.
+
+        Braille offers two sizes and nothing between: one cell is 2 dots by 4,
+        two cells are 4 by 4 and too large on screen. The shape was settled by
+        looking at it, and a test that pinned 4x4 would only re-break it. What
+        is worth holding is the family — a spinner that is not braille is a
+        different decision, not a tweak.
         """
         for frame in self.C.SPIN:
             with self.subTest(frame=frame):
                 for c in frame:
                     self.assertTrue(0x2800 <= ord(c) <= 0x28FF,
                                     f"{c!r} is not braille")
-                self.assertEqual(len(frame), 2,
-                                 f"{frame!r} is not a 4-dot-wide grid: one "
-                                 f"cell is 2x4 and three or more is wider "
-                                 f"than it is tall")
 
     def test_the_spinner_actually_moves_around_the_square(self):
         """Four identical frames would also satisfy the formation rule."""
