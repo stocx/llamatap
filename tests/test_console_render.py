@@ -2243,3 +2243,120 @@ class RowsNameTheAction(TapTest):
         for row in arrows:
             self.assertEqual(row.count("→"), 1,
                              f"more than one arrow in a row: {row!r}")
+
+
+class UnknownHarness(TapTest):
+    """Structure, not vocabulary.
+
+    Background detection used to be eleven hardcoded English phrases. On any
+    harness that worded its side-calls differently, the side-call fell through
+    to `who: "you"` — so the console claimed the USER had typed the harness's
+    internal prompt. For a tool whose purpose is being pointed at an
+    unfamiliar harness, that is the worst failure available.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.T = load("thread")
+        self.CAT = load("catalog")
+
+    def req(self, system, msgs, tools=True):
+        r = {"model": "qwen", "messages":
+             [{"role": "system", "content": system}] + msgs}
+        if tools:
+            r["tools"] = [{"type": "function", "function": {
+                "name": "edit", "description": "edit", "parameters": {}}}]
+        return r
+
+    def rec(self, system, msgs, reply="ok", tools=True, i=0):
+        return {"t": f"2026-10-04T12:0{i}:00", "status": 200,
+                "path": "/v1/chat/completions",
+                "req": self.req(system, msgs, tools),
+                "resp": json.dumps({"choices": [{"message": {"content": reply},
+                                                 "finish_reason": "stop"}],
+                                    "usage": {"prompt_tokens": 10,
+                                              "completion_tokens": 3}}),
+                "meta": {"elapsed_ms": 50}}
+
+    def thread(self):
+        """A conversation whose side-call uses wording no table knows."""
+        main = "# Agent\nYou are a coding agent."
+        return [
+            self.rec(main, [{"role": "user", "content": "add a feature"}],
+                     "working on it", i=0),
+            self.rec(main, [{"role": "user", "content": "add a feature"},
+                            {"role": "assistant", "content": "working on it"},
+                            {"role": "user", "content": "now test it"}],
+                     "testing", i=1),
+            # The side-call: different system prompt, does not carry the
+            # thread, and phrased in a way no needle matches.
+            self.rec("Devise une étiquette courte.",
+                     [{"role": "user", "content": "add a feature"}],
+                     "Feature work", tools=False, i=2),
+        ]
+
+    def test_the_wording_matches_no_known_phrase(self):
+        """If it did, this test would prove nothing."""
+        label, _icon = self.CAT.background_kind(
+            "Devise une étiquette courte. add a feature")
+        self.assertIsNone(label, "the fixture accidentally matches a needle")
+
+    def test_the_side_call_is_not_attributed_to_the_user(self):
+        msgs = self.T.conversation(self.thread(), None, False)
+        side = [m for m in msgs if m.get("rec") == 2]
+        self.assertTrue(side, "the side-call produced no messages")
+        for m in side:
+            self.assertNotEqual(
+                m["who"], "you",
+                f"the harness's own prompt was attributed to the user: {m}")
+
+    def test_the_side_call_is_marked_background(self):
+        msgs = self.T.conversation(self.thread(), None, False)
+        setup = [m for m in msgs if m.get("kind") == "setup"
+                 and m.get("rec") == 2]
+        self.assertTrue(setup, "no setup block for the side-call")
+        self.assertTrue(setup[0].get("background"),
+                        "an unrecognised side-call is not marked background")
+
+    def test_main_thread_turns_are_never_marked_background(self):
+        msgs = self.T.conversation(self.thread(), None, False)
+        for m in msgs:
+            if m.get("rec") in (0, 1) and m.get("kind") == "setup":
+                self.assertFalse(m.get("background"),
+                                 f"a main-thread request was called a side "
+                                 f"call: {m}")
+
+    def test_the_user_s_own_words_are_still_the_user_s(self):
+        msgs = self.T.conversation(self.thread(), None, False)
+        mine = [m for m in msgs if m["who"] == "you"]
+        self.assertTrue(any("add a feature" in (m.get("text") or "")
+                            for m in mine),
+                        "the user's message stopped being theirs")
+
+    def test_a_changed_system_prompt_alone_is_not_a_side_call(self):
+        """A harness that legitimately swaps its system prompt mid-thread but
+        keeps the history is still the main thread."""
+        recs = self.thread()[:2]
+        recs.append(self.rec(
+            "# Agent v2\nYou are a coding agent, revised.",
+            [{"role": "user", "content": "add a feature"},
+             {"role": "assistant", "content": "working on it"},
+             {"role": "user", "content": "now test it"},
+             {"role": "assistant", "content": "testing"},
+             {"role": "user", "content": "keep going"}], "sure", i=3))
+        msgs = self.T.conversation(recs, None, False)
+        setup = [m for m in msgs if m.get("kind") == "setup"
+                 and m.get("rec") == 2]
+        self.assertTrue(setup, "no setup block for the revised prompt")
+        self.assertFalse(setup[0].get("background"),
+                         "a legitimate prompt change was called a side call")
+
+    def test_a_stateless_harness_is_not_all_side_calls(self):
+        """One that re-sends no history at all keeps the same system prompt,
+        which is what holds it in the main thread."""
+        main = "# Agent\nYou are a coding agent."
+        recs = [self.rec(main, [{"role": "user", "content": f"step {k}"}],
+                         f"did {k}", i=k) for k in range(4)]
+        msgs = self.T.conversation(recs, None, False)
+        bg = [m for m in msgs if m.get("kind") == "setup" and m.get("background")]
+        self.assertEqual(bg, [], "a stateless harness was read as side calls")

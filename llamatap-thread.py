@@ -1042,6 +1042,25 @@ def conversation(recs, name_hint=None, show_repeats=False):
     msgs = []
     last_setup = None
     harness = name_hint
+    # The MAIN thread, for telling a harness's side-calls apart structurally.
+    #
+    # Deciding that from wording — "Generate a title for this conversation" and
+    # ten other English phrases — only works for harnesses whose phrasing has
+    # been seen before. On any other one the side-call fell through to
+    # `who: "you"`, so the console claimed the USER had typed the harness's
+    # internal prompt. For a tool that exists to be pointed at an unfamiliar
+    # harness, guessing wrong there is the worst failure available.
+    #
+    # Two observable facts decide it instead, and neither depends on language:
+    #   1. the main thread re-sends its history and ADDS to it, so every
+    #      message said so far reappears in the next request; a side-call
+    #      carries at most a quote of it
+    #   2. a side-call carries its own system prompt
+    # Both are required. A harness that legitimately changes its system prompt
+    # mid-conversation still satisfies (1), so it stays in the main thread;
+    # one that sends no history at all fails (2) and stays there too.
+    main_texts = set()
+    main_pre = None
 
     for ri, rec in enumerate(recs):
         h = header_parts(rec, name_hint)
@@ -1060,6 +1079,29 @@ def conversation(recs, name_hint=None, show_repeats=False):
             short = f"{short} + llamatap"
 
         # the harness assembling the request is itself a message
+        req_pre, req_turns = normalise(rec.get("req"))
+        said = {(x.get("who"), (x.get("text") or "").strip())
+                for x in req_turns if (x.get("text") or "").strip()}
+        if main_pre is None:
+            side = False            # the first request defines the main thread
+        else:
+            # A main-thread request EXTENDS the conversation: it re-sends
+            # everything said so far and adds to it. A side-call does not.
+            # "Shares no messages at all" was too strict — a title generator
+            # quotes the user's own words back, so it overlapped by one and
+            # was read as part of the thread.
+            side = (req_pre.strip() != main_pre
+                    and not main_texts.issubset(said))
+        if side:
+            # `background_kind` is now only asked what to CALL it. An
+            # unrecognised side-call is still a side-call; it just goes
+            # unnamed rather than being mistaken for the user.
+            h["background"] = h.get("background") or "side call"
+        else:
+            h["background"] = None
+            main_texts |= said
+            main_pre = req_pre.strip()
+
         sig = (len(h["preamble"]), h.get("tools_chars", 0), bool(h.get("background")))
         if sig != last_setup:
             total = len(h["preamble"]) + h.get("tools_chars", 0)

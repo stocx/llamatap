@@ -401,6 +401,28 @@ load and network for the server box.
 
 ## What is observed and what is inferred
 
+**A harness's side-calls are found structurally, not by their wording.** A
+title generator or summariser used to be recognised by matching eleven English
+phrases. On any harness that phrased its own differently, the side-call fell
+through to `you` — the console claimed the user had typed the harness's
+internal prompt, which is the worst thing this tool can get wrong.
+
+Two observable facts decide it now, neither of them language:
+
+1. a main-thread request **extends** the conversation — every message said so
+   far reappears in it; a side-call carries at most a quote
+2. a side-call carries **its own system prompt**
+
+Both are required, which is what keeps the rule from over-firing. A harness
+that legitimately swaps its system prompt mid-thread still carries the
+history, so it stays in the main thread. One that re-sends no history at all
+keeps the same system prompt, so it stays too.
+
+The phrase table survives only to **name** what a side-call is — "title
+generator", "summariser". An unrecognised one is still correctly a side-call;
+it is just labelled "side call" rather than named.
+
+
 This matters more than any feature here, because the whole project is about
 measuring harnesses and a measurement that quietly guesses is worse than none.
 
