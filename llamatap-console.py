@@ -113,14 +113,16 @@ INFLIGHT = os.environ.get("LLAMATAP_INFLIGHT",
 # give a 4x4 dot grid, and since a terminal cell is roughly twice as tall as
 # it is wide, two of them is also square ON SCREEN.
 #
-# The frames are a line rotating through the centre of that grid: horizontal,
-# down-right, vertical, down-left.
+# The frames are the same rotating arc the single-cell spinner had — a thick
+# segment travelling round the perimeter — just drawn on a grid big enough to
+# be square. Eight frames, six of the twelve border dots lit at a time.
 #
 # A frame is a STRING, not a character — set LLAMATAP_SPINNER to a run of
 # single characters if your font handles those better, and each one becomes a
 # frame.
 _SPIN_ENV = os.environ.get("LLAMATAP_SPINNER")
-SPIN = tuple(_SPIN_ENV) if _SPIN_ENV else ("⠒⠤", "⠑⢄", "⠘⡄", "⡠⠊")
+SPIN = tuple(_SPIN_ENV) if _SPIN_ENV else (
+    "⠉⠹", "⠀⣹", "⢀⣸", "⣀⣰", "⣆⣀", "⣏⠀", "⡏⠁", "⠏⠉")
 
 #: Every block starts hard against the left edge. A two-column margin made the
 #: accent bars look indented rather than justified, and it is two columns off
