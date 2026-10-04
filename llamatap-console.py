@@ -1025,15 +1025,20 @@ class Console:
                 # here was indistinguishable from opencode saying something,
                 # which is exactly what the next block often is.
                 #
-                # "setup", not "request": the harness is not asking for
-                # anything here, it is establishing standing instructions and
-                # the tools that exist. "Request" is the HTTP word for the
-                # envelope, which is why the rows underneath still measure
-                # themselves as a share "of the request" — that is the
-                # payload. This row names what the harness is doing.
-                # Not "system prompt" either: the tool definitions are in
-                # here too, and are frequently the larger half.
-                who = f"{m.get('name')} → setup"
+                # "prompting": in this codebase and in llama.cpp, "prompt"
+                # already means the WHOLE input — prompt_tokens, prompt_n and
+                # prompt_per_second all count the system prompt and the tool
+                # definitions together, and the prefill figure on this very
+                # row is what they measure. So it needs no new vocabulary and
+                # does not under-describe the tools half the way "system
+                # prompt" would.
+                #
+                # The gerund because this column is actions: `qwen → thinking`
+                # beside `opencode → prompting` reads as two parties each
+                # doing something. "Request" was the HTTP word for the
+                # envelope — which is why the rows underneath still measure
+                # their share "of the request", since that is the payload.
+                who = f"{m.get('name')} → prompting"
 
 
             if m.get("repeat"):

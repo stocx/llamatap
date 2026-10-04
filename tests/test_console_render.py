@@ -2225,9 +2225,9 @@ class RowsNameTheAction(TapTest):
         c.rebuild()
         return ["".join(ch for _, ch, _ in s).rstrip() for s in c.lines]
 
-    def test_the_setup_block_says_setup(self):
+    def test_the_setup_block_says_prompting(self):
         rows = self.rows([a_record(0)])
-        self.assertTrue(any("→ setup" in l for l in rows),
+        self.assertTrue(any("→ prompting" in l for l in rows),
                         "the setup block does not name what it is")
 
     def test_a_tool_call_names_the_kind_then_the_tool(self):

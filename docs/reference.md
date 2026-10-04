@@ -110,7 +110,7 @@ structure in place.
 ```
   in this thread:  you   opencode   llama-server b11040   qwen3.5-35b-moe
 
-  opencode → setup                      45,724 chars · ~11,431 tokens · 11.4s prefill
+  opencode → prompting                    45,724 chars · ~11,431 tokens · 11.4s prefill
   ▌ + system prompt   23,022 chars · 50% of the request
   ▌      + Tone and style        2,290 chars ·  9% of the prompt
   ▌      + <available_skills>   14,018 chars · 60% of the prompt
