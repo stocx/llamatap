@@ -69,7 +69,7 @@ class ThinkingFold(TapTest):
         c.follow = True
         c.top = 0
         c.opts = {"rawjson": False, "preamble": False, "flags": False,
-                  "repeats": False, "fold_thinking": fold}
+                  "repeats": False, "fold_thinking": fold, "stats": True}
         c.open = set()
         c.touched = set()
         c.hover = None
@@ -108,7 +108,7 @@ class ThinkingFold(TapTest):
 
     def test_it_starts_expanded_with_a_minus(self):
         body = self.text_of(self.console(fold=False))
-        row = next(l for l in body.split("\n") if "💭" in l)
+        row = next(l for l in body.split("\n") if "Thought:" in l)
         self.assertIn("−", row, f"expected an open node marker: {row!r}")
 
     def test_one_thought_can_be_closed_on_its_own(self):
@@ -117,7 +117,7 @@ class ThinkingFold(TapTest):
         before = len(c.lines)
         c.toggle(nodes[0])
         self.assertLess(len(c.lines), before, "closing one changed nothing")
-        rows = [l for l in self.text_of(c).split("\n") if "💭" in l]
+        rows = [l for l in self.text_of(c).split("\n") if "Thought:" in l]
         self.assertIn("+", rows[0], "the clicked thought did not close")
         self.assertIn("−", rows[1], "closing one closed the others too")
 
@@ -126,7 +126,7 @@ class ThinkingFold(TapTest):
         nodes = [n for (_l, _a, _b, n) in c.hotspots if n[1] == "thinking"]
         c.toggle(nodes[0])
         c.rebuild()
-        rows = [l for l in self.text_of(c).split("\n") if "💭" in l]
+        rows = [l for l in self.text_of(c).split("\n") if "Thought:" in l]
         self.assertIn("+", rows[0],
                       "the default reopened a thought the user had closed")
 
@@ -136,7 +136,7 @@ class ThinkingFold(TapTest):
         nodes = [n for (_l, _a, _b, n) in c.hotspots if n[1] == "thinking"]
         c.toggle(nodes[0])                      # open one by hand
         c.run_cmd("thinking close")
-        for row in [l for l in self.text_of(c).split("\n") if "💭" in l]:
+        for row in [l for l in self.text_of(c).split("\n") if "Thought:" in l]:
             self.assertIn("+", row, "a hand-opened thought stayed open")
 
     def test_folded_hides_the_text(self):
@@ -152,8 +152,8 @@ class ThinkingFold(TapTest):
     def test_folded_still_states_the_cost(self):
         """The point of the collapsed row."""
         body = self.text_of(self.console(fold=True))
-        self.assertIn("💭", body, "no folded thinking row at all")
-        row = next(l for l in body.split("\n") if "💭" in l)
+        self.assertIn("Thought:", body, "no folded thinking row at all")
+        row = next(l for l in body.split("\n") if "Thought:" in l)
         self.assertIn("tokens", row, f"no token count on the folded row: {row!r}")
         self.assertRegex(row, r"\d+\.\d+s|\d+s",
                          f"no duration on the folded row: {row!r}")
@@ -172,7 +172,7 @@ class ThinkingFold(TapTest):
         c.scr = Screen(); c.recs = [rec]; c.name = None; c.extra = []
         c.follow = True; c.top = 0
         c.opts = {"rawjson": False, "preamble": False, "flags": False,
-                  "repeats": False, "fold_thinking": True}
+                  "repeats": False, "fold_thinking": True, "stats": True}
         c.open = set(); c.touched = set()
         c.hover = None; c.hotspots = []; c.starts = []
         c.menu = []; c.detail = None; c.node_bodies = {}; c.inflight = []
@@ -180,7 +180,7 @@ class ThinkingFold(TapTest):
         c._flags = ""; c._flags_started = True; c._flags_err = ""
         c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
         c.rebuild()
-        row = next((l for l in self.text_of(c).split("\n") if "💭" in l), "")
+        row = next((l for l in self.text_of(c).split("\n") if "Thought:" in l), "")
         self.assertTrue("s" in row.split("tokens")[-1] or "unknown" in row,
                         f"neither a duration nor a reason for its absence: {row!r}")
 
@@ -197,8 +197,8 @@ class ThinkingFold(TapTest):
                       "opening one node did not reveal its text")
         # and the other is still shut
         self.assertEqual(
-            sum(1 for l in body.split("\n") if l.strip().startswith("+ 💭")
-                or "+ 💭" in l), 1,
+            sum(1 for l in body.split("\n") if l.strip().startswith("+ Thought:")
+                or "+ Thought:" in l), 1,
             "the second thought did not stay folded")
 
     def test_open_all_then_close_all(self):
@@ -208,7 +208,7 @@ class ThinkingFold(TapTest):
         self.assertFalse(c.opts["fold_thinking"])
         c.run_cmd("thinking close")
         self.assertNotIn("Let me work through this", self.text_of(c))
-        self.assertIn("💭", self.text_of(c), "the folded rows disappeared")
+        self.assertIn("Thought:", self.text_of(c), "the folded rows disappeared")
 
     def test_the_bare_command_toggles(self):
         c = self.console(fold=False)
@@ -250,16 +250,17 @@ class ThinkingFold(TapTest):
         self.assertIn("what is 2+2?", body)
         self.assertIn("four", body)
 
-    def test_dashboard_still_aligns_when_folded(self):
+    def test_the_rail_still_fits_when_folded(self):
+        """Folding changes the conversation, never the rail."""
         for cols in (90, 118, 160):
             with self.subTest(cols=cols):
                 c = self.console(fold=True, cols=cols)
-                widths = set()
-                for spans, _ in c.dash(cols):
+                w = c.rail_w()
+                for spans, _ in c.dash(w):
                     t = ("".join(x for x, _ in spans)
                          if isinstance(spans, list) else spans)
-                    widths.add(self.C.dwidth(t))
-                self.assertEqual(len(widths), 1, f"ragged border: {widths}")
+                    self.assertLessEqual(self.C.dwidth(t), w,
+                                         f"rail row too wide: {t!r}")
 
 
 if __name__ == "__main__":

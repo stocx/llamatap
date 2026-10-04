@@ -3,7 +3,7 @@
 
 Kept separate from the renderer so adding a newly-recognised thing is a one-line
 edit here rather than surgery on the display code. The rule for this project:
-anything we can identify gets a name, an icon, and a pretty form — and `--raw`
+anything we can identify gets a name and a readable form — and `--raw`
 turns all of it off.
 """
 
@@ -15,32 +15,37 @@ turns all of it off.
 # are one category, and a reader should not have to know which harness is
 # speaking to see that.
 TOOL_CLASSES = [
-    ("mcp",     "🔌", ("mcp__",)),
-    ("skill",   "🎓", ("skill", "load_skill", "use_skill")),
-    ("agent",   "🧩", ("agent", "task", "subagent", "delegate", "dispatch")),
-    ("shell",   "🖥 ", ("bash", "shell", "run_js", "run_javascript", "execute",
+    ("mcp",     "", ("mcp__",)),
+    ("skill",   "", ("skill", "load_skill", "use_skill")),
+    ("agent",   "", ("agent", "task", "subagent", "delegate", "dispatch")),
+    ("shell",   "", ("bash", "shell", "run_js", "run_javascript", "execute",
                         "execute_command", "run_command", "terminal", "sh")),
-    ("edit",    "✂️ ", ("edit", "str_replace", "replace_in_file", "apply_diff",
+    ("edit",    "", ("edit", "str_replace", "replace_in_file", "apply_diff",
                         "patch", "multiedit")),
-    ("write",   "✏️ ", ("write", "write_file", "write_to_file", "create_file", "new_file")),
-    ("read",    "📖", ("read", "read_file", "cat", "view", "open_file")),
-    ("search",  "🔍", ("grep", "search", "search_files", "ripgrep", "codebase_search")),
-    ("list",    "📁", ("ls", "list", "list_files", "glob", "file_glob_search", "tree")),
-    ("web",     "🌐", ("web", "fetch", "webfetch", "websearch", "browser", "curl")),
-    ("todo",    "☑️ ", ("todo", "todowrite", "task_list", "plan")),
-    ("ask",     "❓", ("ask", "ask_followup_question", "followup", "attempt_completion")),
+    ("write",   "", ("write", "write_file", "write_to_file", "create_file", "new_file")),
+    ("read",    "", ("read", "read_file", "cat", "view", "open_file")),
+    ("search",  "", ("grep", "search", "search_files", "ripgrep", "codebase_search")),
+    ("list",    "", ("ls", "list", "list_files", "glob", "file_glob_search", "tree")),
+    ("web",     "", ("web", "fetch", "webfetch", "websearch", "browser", "curl")),
+    ("todo",    "", ("todo", "todowrite", "task_list", "plan")),
+    ("ask",     "", ("ask", "ask_followup_question", "followup", "attempt_completion")),
 ]
 
 
 def classify_tool(name):
-    """(category, icon) for a tool name. Unknown tools get a neutral icon
-    rather than being hidden — an unrecognised tool is itself information."""
+    """(category, icon) for a tool name.
+
+    The icon is now always empty. The CATEGORY was the load-bearing part — it
+    groups tools doing the same job under different names across harnesses —
+    and callers still get it unchanged. The pictures were decoration, and
+    fifteen of them in one pane read as cartoonish.
+    """
     n = (name or "").lower()
     for cat, icon, needles in TOOL_CLASSES:
         for needle in needles:
             if n.startswith(needle) or n == needle or needle in n:
                 return cat, icon
-    return "tool", "🔧"
+    return "tool", ""
 
 
 # ------------------------------------------------------- content-block markers
@@ -50,21 +55,21 @@ def classify_tool(name):
 # project an injected environment snapshot and a project instructions file have
 # repeatedly turned out to be most of a "small" request.
 CONTENT_MARKERS = [
-    ("project instructions", "📓", ("AGENTS.md", "CLAUDE.md", "AGENT.md",
+    ("project instructions", "", ("AGENTS.md", "CLAUDE.md", "AGENT.md",
                                     ".cursorrules", "CONVENTIONS.md")),
-    ("environment snapshot", "🧭", ("<environment_details>", "# Current Working Directory",
+    ("environment snapshot", "", ("<environment_details>", "# Current Working Directory",
                                     "<workspace_diagnostics>", "Current time:")),
-    ("system reminder",      "🔔", ("<system-reminder>",)),
-    ("skills index",         "🎓", ("<available_skills>", "Available skills:",
+    ("system reminder",      "", ("<system-reminder>",)),
+    ("skills index",         "", ("<available_skills>", "Available skills:",
                                     "## Skills", "progressive disclosure")),
-    ("mcp servers",          "🔌", ("<mcp_servers>", "MCP SERVERS", "Connected MCP")),
-    ("file contents",        "📄", ("<file_content", "```\n#!/", "<document>")),
-    ("git state",            "🌿", ("<git_status>", "Recent commits:", "git diff --stat")),
-    ("todo state",           "☑️ ", ("<todo_list>", "# Task List")),
+    ("mcp servers",          "", ("<mcp_servers>", "MCP SERVERS", "Connected MCP")),
+    ("file contents",        "", ("<file_content", "```\n#!/", "<document>")),
+    ("git state",            "", ("<git_status>", "Recent commits:", "git diff --stat")),
+    ("todo state",           "", ("<todo_list>", "# Task List")),
     # Needles must be SECTION HEADERS, not phrases. "TOOL USE" on its own
     # matched the sentence "not including tool use or code generation", so the
     # chip claimed a tool-rules section that was not there.
-    ("tool rules",           "📏", ("# Tool Use Rules", "# Tool usage policy",
+    ("tool rules",           "", ("# Tool Use Rules", "# Tool usage policy",
                                     "## Tool Use Guidelines", "# Tool Use Policy")),
 ]
 
@@ -95,13 +100,13 @@ def markers_in(text):
 
 # ------------------------------------------------------------------ turn kinds
 TURN_STYLE = {
-    "you":          ("🗣 ", "YOU"),
-    "model":        ("🤖", "LLAMA"),
-    "thinking":     ("💭", "LLAMA (thinking)"),
-    "tool call":    ("🔧", "LLAMA calls"),
-    "tool result":  ("📤", "tool result"),
-    "system":       ("📜", "system prompt"),
-    "cut off":      ("⚠️ ", "TRUNCATED"),
+    "you":          ("", "YOU"),
+    "model":        ("", "LLAMA"),
+    "thinking":     ("", "LLAMA (thinking)"),
+    "tool call":    ("", "LLAMA calls"),
+    "tool result":  ("", "tool result"),
+    "system":       ("", "system prompt"),
+    "cut off":      ("", "TRUNCATED"),
 }
 
 
@@ -113,15 +118,15 @@ TURN_STYLE = {
 # reasoning to choose the word "Greeting". Showing their prompts as "YOU"
 # implies the user typed them, which is the opposite of the point.
 BACKGROUND = [
-    ("title generator", "🏷 ", ("Generate a title for this conversation",
+    ("title generator", "", ("Generate a title for this conversation",
                                 "You are a title generator",
                                 "generate a short title",
                                 "Generate a brief title")),
-    ("summariser",      "📝", ("Summarize the conversation so far",
+    ("summariser",      "", ("Summarize the conversation so far",
                                "You are a conversation summarizer",
                                "summarize this conversation")),
-    ("autocomplete",    "⌨️ ", ("<|fim_prefix|>", "Complete the following code")),
-    ("embedding",       "🧮", ("Generate an embedding",)),
+    ("autocomplete",    "", ("<|fim_prefix|>", "Complete the following code")),
+    ("embedding",       "", ("Generate an embedding",)),
 ]
 
 
@@ -150,18 +155,17 @@ def background_kind(text):
 # ----------------------------------------------------------------- parties
 #
 # One icon per party, used EVERYWHERE that party appears — the participants
-# line, the turn labels, the tree. Using 🧠 for the model in one place and 🤖
-# in another makes them read as two different things.
-#
-# 🧰 is reserved for the TOOLBOX, so the harness needs its own mark: it is the
-# thing that assembles the request, hence a control panel.
+# Parties are told apart by a coloured accent bar down the left of each block
+# and by their name in plain text, the way opencode does it. That scales to a
+# fifth party without inventing another picture, and it survives being copied
+# out of the terminal, which icon-plus-colour does not.
 PARTY = {
-    "you":     "🧑",
-    "harness": "🎛 ",
-    "server":  "⚙ ",
-    "model":   "🤖",
+    "you":     "",
+    "harness": "",
+    "server":  "",
+    "model":   "",
 }
-TOOLBOX = "🧰"
+TOOLBOX = ""
 
 
 # ------------------------------------------------- structure, not vocabulary
@@ -202,13 +206,9 @@ def sections(text):
 
 
 def section_icon(label):
-    """A decorative icon when a section's own name is recognisable. Purely
-    cosmetic: the LABEL always comes from the prompt, never from here."""
-    l = (label or "").lower()
-    for key, icon in (("skill", "🎓"), ("tool", "🧰"), ("rule", "📏"),
-                      ("example", "💡"), ("env", "🧭"), ("task", "🎯"),
-                      ("remind", "🔔"), ("memor", "📓"), ("mcp", "🔌"),
-                      ("code", "📄"), ("style", "🎨"), ("git", "🌿")):
-        if key in l:
-            return icon
-    return "▪"
+    """Empty. Kept so callers need not change, and so the one place that
+    decided what a section looked like stays the one place to change it.
+
+    The label has always come from the prompt itself; this only ever put a
+    picture beside it."""
+    return ""

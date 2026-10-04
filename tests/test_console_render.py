@@ -141,13 +141,35 @@ class CellWidths(TapTest):
         self.assertEqual(self.C.meter(1.0, 10).count("█"), 10)
 
 
-class Dashboard(TapTest):
+#: every label the old three-panel dashboard showed, taken from dash() before
+#: the restyle. The restyle must not quietly drop one.
+DASHBOARD_LABELS = [
+    "Model", "Quantised", "Runtime", "Slots", "Sampling",
+    "Tools Offered", "Cache Reuse", "Prefill", "Decode",
+    "Context", "Requests", "Messages", "Tokens Generated",
+    "Decode Average", "Prefill Average", "Model Time",
+]
+SETTINGS_LABELS = [
+    "GPU Layers", "Experts on CPU", "Context Window", "K Cache", "V Cache",
+    "Flash Attention", "Jinja Template", "Reasoning", "Draft Model",
+    "Threads", "Batch Size", "Micro Batch", "Memory Lock", "Memory Map",
+]
+
+
+class StatsRail(TapTest):
+    """The statistics moved from a wide bottom panel to a narrow right rail.
+
+    This was a restyle: the same numbers, derived the same way, in a different
+    place. The test that matters is the one asserting every label survived —
+    a redesign is exactly where a statistic goes missing without anyone
+    noticing.
+    """
 
     def setUp(self):
         super().setUp()
         self.C = load("console")
 
-    def console(self, rows, cols, flags=False):
+    def console(self, rows, cols, flags=False, stats=True):
         C = self.C
         recs = [a_record(i) for i in range(6)]
 
@@ -156,73 +178,89 @@ class Dashboard(TapTest):
                 return (rows, cols)
 
         c = C.Console.__new__(C.Console)
-        c.scr = Screen()
-        c.recs = recs
-        c.name = None
-        c.extra = []
-        c.follow = True
-        c.top = 0
+        c.scr = Screen(); c.recs = recs; c.name = None; c.extra = []
+        c.follow = True; c.top = 0
         c.opts = {"rawjson": False, "preamble": False, "flags": flags,
-                  "repeats": False}
-        c.open = set()
-        c.hover = None
-        c.hotspots = []
-        c.starts = []
-        c.menu = []
-        c.detail = None
-        c.node_bodies = {}
-        c.inflight = []
-        c.msg = ""
-        c.msg_until = 0
-        c.tick = 0
-        c._flags = "-ngl 999 -c 65536 --jinja -ctk q8_0 -fa on"
-        c._flags_started = True
-        c._flags_err = ""
-        c._flags_src = "running"
-        c._flags_age = None
-        c._rec_name = {}
+                  "repeats": False, "fold_thinking": False, "stats": stats}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}; c.inflight = []
+        c.msg = ""; c.msg_until = 0; c.tick = 0
+        c._flags = ("-ngl 999 --n-cpu-moe 15 -c 65536 --jinja -ctk q8_0 "
+                    "-ctv q8_0 -fa on -t 4")
+        c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
         c.rebuild()
         return c
 
-    def test_every_row_is_the_same_cell_width(self):
-        for cols in (90, 98, 118, 160, 200):
+    def rail_text(self, c, width=None):
+        w = width if width is not None else c.rail_w()
+        out = []
+        for spans, _ in c.dash(w):
+            out.append("".join(t for t, _ in spans)
+                       if isinstance(spans, list) else spans)
+        return "\n".join(out)
+
+    def test_every_dashboard_statistic_survived(self):
+        """The whole point: a restyle may move a number, never lose it."""
+        text = self.rail_text(self.console(40, 160))
+        missing = [l for l in DASHBOARD_LABELS if l not in text]
+        self.assertEqual(missing, [], f"statistics lost in the restyle: {missing}")
+
+    def test_the_settings_board_survived(self):
+        text = self.rail_text(self.console(40, 160, flags=True))
+        missing = [l for l in SETTINGS_LABELS if l not in text]
+        self.assertEqual(missing, [], f"settings lost in the restyle: {missing}")
+
+    def test_no_rail_row_exceeds_the_rail_width(self):
+        for cols in (80, 100, 140, 190):
             for flags in (False, True):
                 with self.subTest(cols=cols, flags=flags):
                     c = self.console(40, cols, flags)
-                    widths = set()
-                    for spans, _ in c.dash(cols):
-                        text = ("".join(t for t, _ in spans)
-                                if isinstance(spans, list) else spans)
-                        widths.add(self.C.dwidth(text))
-                    self.assertEqual(len(widths), 1,
-                                     f"ragged border: widths {widths}")
+                    w = c.rail_w()
+                    for spans, _ in c.dash(w):
+                        t = ("".join(x for x, _ in spans)
+                             if isinstance(spans, list) else spans)
+                        self.assertLessEqual(
+                            self.C.dwidth(t), w,
+                            f"rail row {t!r} is wider than the {w}-cell rail")
 
-    def test_it_never_takes_most_of_the_screen(self):
-        """It took 23 of 30 rows once, which made the tool unusable."""
+    def test_the_conversation_does_not_run_under_the_rail(self):
+        for cols in (80, 100, 140, 190):
+            with self.subTest(cols=cols):
+                c = self.console(40, cols)
+                limit = cols - c.rail_w() - 1
+                for spans in c.lines:
+                    t = "".join(ch for _, ch, _ in spans)
+                    self.assertLessEqual(self.C.dwidth(t), limit,
+                                         f"conversation runs under the rail: {t!r}")
+
+    def test_hiding_the_rail_gives_the_width_back(self):
+        wide = self.console(40, 140, stats=False)
+        narrow = self.console(40, 140, stats=True)
+        self.assertEqual(wide.rail_w(), 0)
+        self.assertGreater(narrow.rail_w(), 0)
+        self.assertGreater(wide._conv_w, narrow._conv_w,
+                           "hiding the rail did not widen the conversation")
+
+    def test_the_rail_hides_itself_on_a_narrow_terminal(self):
+        self.assertEqual(self.console(40, 70).rail_w(), 0,
+                         "the rail should not eat a narrow terminal")
+
+    def test_the_stats_command_toggles(self):
+        c = self.console(40, 140)
+        self.assertGreater(c.rail_w(), 0)
+        c.run_cmd("stats")
+        self.assertEqual(c.rail_w(), 0)
+        c.run_cmd("stats")
+        self.assertGreater(c.rail_w(), 0)
+
+    def test_the_stats_never_take_rows_from_the_conversation(self):
+        """The complaint that started this: the panel took the bottom of the
+        screen. A rail costs columns, which a wide terminal has."""
         for rows in (24, 30, 40, 60):
-            for flags in (False, True):
-                with self.subTest(rows=rows, flags=flags):
-                    c = self.console(rows, 140, flags)
-                    used = len(c.dash(140))
-                    self.assertLessEqual(used, int(rows * 0.5),
-                                         f"dashboard took {used} of {rows} rows")
-                    self.assertGreaterEqual(c.view_h(), 5,
-                                            "no room left for the conversation")
-
-    def test_the_settings_board_obeys_its_toggle(self):
-        off = len(self.console(40, 140, flags=False).dash(140))
-        on = len(self.console(40, 140, flags=True).dash(140))
-        self.assertGreater(on, off,
-                           "/flags did not change the dashboard at all")
-
-    def test_the_launch_command_shows_without_the_board(self):
-        """One row, always: it is the most informative line in the panel and
-        must not be hidden by the 14-row settings board's toggle."""
-        c = self.console(40, 140, flags=False)
-        text = "\n".join(
-            ("".join(t for t, _ in spans) if isinstance(spans, list) else spans)
-            for spans, _ in c.dash(140))
-        self.assertIn("-ngl 999", text)
+            with self.subTest(rows=rows):
+                c = self.console(rows, 140)
+                self.assertEqual(c.view_h(), rows - 2)
 
 
 class BackgroundDetection(TapTest):
@@ -419,3 +457,100 @@ class ClickTarget(TapTest):
                 self.assertNotIn(token, src,
                                  f"{token} is back; the +/- glyph is the "
                                  f"affordance now")
+
+
+class NoDecoration(TapTest):
+    """The conversation pane carries no emoji and no box-drawing.
+
+    It used to contain 31 distinct wide glyphs — 15+ emoji for parties,
+    sections and tool classes, plus `╭ ╮ ╰ ╯ ─ │ ┬ ├ └ ▸` speech bubbles whose
+    chrome ran to nearly two thousand characters in one conversation. It read
+    as cartoonish beside the content it was framing.
+
+    One glyph survives by design: `│`, the accent bar that marks which party a
+    block belongs to. Emoji in the MODEL'S OWN OUTPUT are content, not
+    decoration, and must not be stripped.
+    """
+
+    ALLOWED = {"│", "·", "█", "…", "−", "─"}
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def console(self, cols=120, fold=False):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, cols)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(i) for i in range(4)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": fold, "stats": True}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}; c.inflight = []
+        c.msg = ""; c.msg_until = 0; c.tick = 0
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        return c
+
+    def rendered(self, c):
+        return "\n".join("".join(ch for _, ch, _ in s) for s in c.lines)
+
+    def test_no_emoji_in_the_conversation(self):
+        for fold in (False, True):
+            with self.subTest(fold=fold):
+                bad = sorted({ch for ch in self.rendered(self.console(fold=fold))
+                              if 0x1F300 <= ord(ch) <= 0x1FAFF
+                              or 0x2600 <= ord(ch) <= 0x27BF})
+                self.assertEqual(bad, [], f"emoji back in the view: {bad}")
+
+    def test_no_box_drawing_except_the_accent_bar(self):
+        bad = sorted({ch for ch in self.rendered(self.console())
+                      if 0x2500 <= ord(ch) <= 0x257F and ch not in self.ALLOWED})
+                       
+        self.assertEqual(bad, [], f"box-drawing back in the view: {bad}")
+
+    def test_the_accent_bar_is_there(self):
+        self.assertIn("│", self.rendered(self.console()),
+                      "no accent bar — blocks have nothing marking their party")
+
+    def test_the_tree_uses_plain_indentation(self):
+        c = self.console()
+        for nid in [n for (_l, _a, _b, n) in c.hotspots]:
+            c.open.add(nid)
+        c.rebuild()
+        for ch in ("├", "└", "┬", "▸", "╭", "╮", "╰", "╯", "┊", "┈"):
+            with self.subTest(glyph=ch):
+                self.assertNotIn(ch, self.rendered(c))
+
+    def test_emoji_in_the_model_s_own_words_are_kept(self):
+        """Decoration is ours to remove; content is not."""
+        C = self.C
+        rec = a_record(0)
+        import json as _j
+        rec["resp"] = _j.dumps({"choices": [{"message": {"content": "done ✅ fast ⚡"},
+                                             "finish_reason": "stop"}]})
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 120)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [rec]; c.name = None; c.extra = []
+        c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": False, "stats": True}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}; c.inflight = []
+        c.msg = ""; c.msg_until = 0; c.tick = 0
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        body = self.rendered(c)
+        self.assertIn("✅", body, "the model's own emoji were stripped")
+        self.assertIn("⚡", body)

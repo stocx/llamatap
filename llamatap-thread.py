@@ -510,10 +510,10 @@ def server_panel(model, w, show_flags=True):
     prm = g.get("params") or {}
     caps = d.get("chat_template_caps") or {}
     print(f"{C['rule']}{'─' * w}{C['off']}")
-    print(f"{C['bold']}  🧠 {d.get('model_alias', model)}{C['off']}"
+    print(f"{C['bold']}  {d.get('model_alias', model)}{C['off']}"
           f"   {d.get('model_ftype','?')}   "
           f"{os.path.basename(d.get('model_path','') or '')}")
-    print(f"  📐 context {g.get('n_ctx', '?'):,} tokens"
+    print(f"  context {g.get('n_ctx', '?'):,} tokens"
           f"   slots {d.get('total_slots','?')}"
           f"   llama.cpp {d.get('build_info','?')}")
     sampl = []
@@ -523,7 +523,7 @@ def server_panel(model, w, show_flags=True):
             v = prm[k]
             sampl.append(f"{label} {round(v, 3) if isinstance(v, float) else v}")
     if sampl:
-        print(f"  🎚  {'   '.join(sampl)}")
+        print(f"  {'   '.join(sampl)}")
     cap_bits = []
     if caps.get("supports_tools"):
         cap_bits.append("tools")
@@ -534,11 +534,11 @@ def server_panel(model, w, show_flags=True):
     if not caps.get("supports_preserve_reasoning"):
         cap_bits.append("no reasoning preservation")
     if cap_bits:
-        print(f"  🧪 template: {', '.join(cap_bits)}")
+        print(f"  template: {', '.join(cap_bits)}")
     mod = d.get("modalities") or {}
     on = [k for k, v in mod.items() if v]
     if on:
-        print(f"  👁  modalities: {', '.join(on)}")
+        print(f"  modalities: {', '.join(on)}")
 
     if show_flags:
         cmd = launch_flags(model)
@@ -681,11 +681,11 @@ def show(turn, name, w, raw, icons=True, model="the model", stat=""):
         icon, col, ind = ticon, C["tool"], "    "
         label = f"{model} → {turn.get('tool')}()   [{tcat}]"
     elif kind == "thinking":
-        icon, label, col, ind = cat.PARTY["model"] + "💭", f"{model} (thinking)", C["think"], "    "
+        icon, label, col, ind = "", f"{model} (thinking)", C["think"], "    "
     elif kind == "cut off":
-        icon, label, col, ind = "⚠️ ", "TRUNCATED", "\033[31m", "    "
+        icon, label, col, ind = "", "TRUNCATED", "\033[31m", "    "
     elif kind == "tool result":
-        icon, col, ind = "📤", C["tool"], ""
+        icon, col, ind = "", C["tool"], ""
     elif kind == "background":
         icon, col, ind = cat.PARTY["harness"], C["harness"], ""
         label = f"{name.split(' · ')[0]} → asks on its own behalf, not typed by you"
@@ -786,10 +786,12 @@ def render(rec, name_override, raw, show_preamble, icons=True, flags=True,
             pass
         P = cat.PARTY
         short = name.split(" · ")[0]
+        # Party icons are empty now, so join the names directly rather than
+        # leaving the gaps where pictures used to be.
         print(f"{C['label']}  in this thread:{C['off']} "
-              f"{P['you']} you · {P['harness'].rstrip()} {short} (harness) · "
-              f"{P['server']}llama-server {build or '(version unknown)'} · "
-              f"{P['model']}{model}\n")
+              f"you · {short} (harness) · "
+              f"llama-server {build or '(version unknown)'} · "
+              f"{model}\n")
 
     if preamble:
         n = len(preamble)
@@ -805,7 +807,7 @@ def render(rec, name_override, raw, show_preamble, icons=True, flags=True,
                              - dwidth(f"{n:,} chars · ~{n//4:,} tokens"))
             print(f"{C['harness']}── {lead}{sname} → sets up the request {rule}{C['off']}"
                   f"{C['label']}  {n:,} chars · ~{n//4:,} tokens{C['off']}")
-            print(f"{C['label']}     📜 system prompt{C['off']}")
+            print(f"{C['label']}     system prompt{C['off']}")
             # Sections from the prompt's OWN headings and tag opens, the same
             # source the console uses. This used to call a hardcoded list of
             # opencode's phrases, so the two front ends disagreed about the
@@ -813,7 +815,9 @@ def render(rec, name_override, raw, show_preamble, icons=True, flags=True,
             # reader silently found nothing.
             found = cat.sections(preamble)
             for k, sec in enumerate(found):
-                branch = "└" if k == len(found) - 1 else "├"
+                # Plain indentation; the tree glyphs said what the indent
+                # already said.
+                branch = " "
                 tip = f"{cat.section_icon(sec['label'])} " if icons else ""
                 pct = (100 * sec["length"] // n) if n else 0
                 print(f"{C['label']}        {branch} {tip}{sec['label'][:30]:<32}{C['off']}"

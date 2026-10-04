@@ -85,12 +85,12 @@ Reach for llamatap when you need to read the content.
 
 ## The four participants
 
-    🧑 you              what you typed
-    🎛  the harness      writes the system prompt, defines the tools, runs
-                        them, and speaks for itself in background requests
-    ⚙  llama-server     renders the chat template, turns the tool list into
-                        prose inside the prompt, parses tool calls back out
-    🤖 the model        thinks, replies, asks for tools
+    you              what you typed
+    the harness      writes the system prompt, defines the tools, runs
+                     them, and speaks for itself in background requests
+    llama-server     renders the chat template, turns the tool list into
+                     prose inside the prompt, parses tool calls back out
+    the model        thinks, replies, asks for tools
 
 `llama-server` is the participant people forget. It is why 11 tool definitions
 cost thousands of tokens: they arrive as JSON and leave as English.
@@ -108,23 +108,23 @@ headers. Every message appears where it happened; a `+` opens structure in
 place.
 
 ```
-  in this thread: 🧑 you · 🎛 opencode (harness) · ⚙ llama-server b11040-5b335f413 · 🤖 qwen3.5-35b-moe
+  in this thread: you · opencode (harness) · llama-server b11040 · qwen3.5-35b-moe
 
-  12:56:13  🎛 opencode              45,724 chars · ~11,431 tokens · 11.4s prefill
-              + 📜 system prompt   23,022 chars · 50% of the request
-                 ├ + 🎨 Tone and style        2,290 chars ·  9% of the prompt
-                 ├ + 🎯 Doing tasks           1,434 chars ·  6% of the prompt
-                 └ + 🎓 <available_skills>   14,018 chars · 60% of the prompt
-              + 🧰 11 tools        22,702 chars · 49% of the request
+  opencode                              45,724 chars · ~11,431 tokens · 11.4s prefill
+  + system prompt   23,022 chars · 50% of the request
+       + Tone and style        2,290 chars ·  9% of the prompt
+       + <available_skills>   14,018 chars · 60% of the prompt
+  + 11 tools        22,702 chars · 49% of the request
 
-  12:56:13  🧑 you                                        5 chars · ~1 tokens
-              ╭───────╮
-              │ hello │
-              ╰──┬────╯
-                 ╰─▸
+  you                                                       5 chars · ~1 tokens
+  │ hello
+  │ 12:56
 
-  12:56:13      🤖💭 qwen3.5-35b-moe (thinking)   105 chars · ~26 tokens · ~0.5s
-  12:56:13      🤖 qwen3.5-35b-moe                 34 tokens · 0.6s · 57/sec
+  + Thought: ~26 tokens · ~0.5s
+
+      qwen3.5-35b-moe                              34 tokens · 0.6s · 57/sec
+      │ Hello. What would you like to do?
+      │ 12:56
 ```
 
 Streaming is live: a message appears as it arrives, with a spinner and the
@@ -137,15 +137,32 @@ about the model, about this turn, or about the whole session?" and the column
 answers it.
 
 ```
-╭──────── Model Details ────────┬────── Current Request ───────┬─── Session Totals ─────╮
-│ Model      qwen3.5-35b-moe    │ Tools Offered  11            │ Context   ██····· 24%  │
-│ Quantised  IQ4_XS - 4.25 bpw  │ Cache Reuse    ██████· 100%  │           15,427 of    │
-│ Runtime    llama.cpp b11040   │                15,407 reused │           65,536       │
-│ Slots      4                  │ Prefill        20 at 135/sec │ Requests  25           │
-│ Sampling   temp 1.0, top_k 20 │ Decode         40 at 83.7/s  │ Messages  48           │
-├───────────────────────────────┴──────────────────────────────┴────────────────────────┤
-│ $ -ngl 999 --n-cpu-moe 15 -t 4 -c 65536 --jinja -ctk q8_0 -ctv q8_0 -fa on            │
-╰───────────────────────────────────────────────────────────────────────────────────────╯
+Session
+Context
+  15,427 of 65,536 tokens
+Requests         25
+Messages         48
+Tokens Generated 3,666
+Decode Average   66.3/sec
+Prefill Average  792/sec
+Model Time       74 seconds
+
+This turn
+Tools Offered   11
+Cache Reuse     ██████████· 100%
+  15,407 reused, 20 new
+Prefill
+  20 tokens at 135/sec
+Decode
+  40 tokens at 83.7/sec
+
+Model
+Model
+  qwen3.5-35b-moe
+Quantised       IQ4_XS - 4.25 bpw
+Runtime
+  llama.cpp b11040
+Slots           4
 ```
 
 | panel | scope | changes |
@@ -190,6 +207,7 @@ row and always shown; the two no longer share a toggle.
     p                open or close the system prompt
     f                show or hide the launch settings in Model Details
     t                fold the model's thinking to one line, or unfold it
+    s                show or hide the statistics rail
     y                copy the whole scroll buffer to the clipboard
     /                command palette, filters as you type
     Esc              cancel — it does NOT quit
@@ -223,6 +241,7 @@ Tab completes, Enter runs, Esc cancels.
 | `/flags` | show or hide the launch settings in Model Details |
 | `/repeats [open\|close]` | show re-sent messages as collapsed lines; open or close them all |
 | `/thinking [open\|close]` | fold the model's thinking to one line; open or close them all |
+| `/stats` | show or hide the statistics rail on the right |
 | `/name <label>` | override the detected harness name |
 | `/help` | list these commands and the keys |
 | `/quit` | exit |

@@ -167,6 +167,7 @@ HELP = [
     "p                open or close the system prompt",
     "f                show or hide the launch settings in Model Details",
     "t                fold the model's thinking to one line, or unfold it",
+    "s                show or hide the statistics rail",
     "y                copy the whole scroll buffer to the clipboard",
     "/                command palette, filters as you type",
     "Esc              cancel — it does NOT quit",
@@ -190,6 +191,7 @@ COMMANDS = [
     ("flags",    "",                 "show or hide the launch settings in Model Details"),
     ("repeats",  "[open|close]",     "show re-sent messages as collapsed lines; open/close them all"),
     ("thinking", "[open|close]",     "fold the model's thinking to one line; open/close them all"),
+    ("stats",    "",                 "show or hide the statistics rail on the right"),
     ("name",     "<label>",          "override the detected harness name"),
     ("help",     "",                 "list these commands"),
     ("quit",     "",                 "exit llamatap console"),
@@ -528,36 +530,28 @@ class Console:
                 out.append(indent + cur)
         return out
 
-    def bubble(self, body, col, indent, width, style="solid", text_col=None):
-        """Draw the message text in a bubble, the way a chat client does.
+    def block(self, body, col, indent, width, text_col=None, foot=None):
+        """Message text behind a coloured accent bar.
 
-        `solid` for things actually said; `dotted` for the model thinking,
-        which is not speech — it is the model muttering before it answers.
+        Replaces a drawn bubble — `╭ ╮ ╰ ╯ ─ │` plus a `╰─▸` tail — whose
+        chrome ran to nearly two thousand box characters in one conversation
+        and read as cartoonish beside the content. A single `│` in the
+        speaker's colour says the same thing: this text belongs to them.
+
+        `foot` is a dim line inside the bar, used for the timestamp, which
+        used to occupy a column on the far left of every single row.
         """
-        tl, tr, bl, br, h, v = ("╭", "╮", "╰", "╯", "─", "│")
-        if style == "dotted":
-            h, v = "┈", "┊"
-        text_col = text_col or col
-        lines = self._wrap(body, width - 4, "")
-        inner = max((dwidth(l) for l in lines), default=0)
-        inner = max(4, min(inner, width - 4))
+        text_col = text_col if text_col is not None else C_BODY
         pad = " " * indent
-        self.emit(f"{col}{pad}{tl}{h * (inner + 2)}{tr}{C_OFF}")
+        # Trailing blank lines in the source text became bare `│` rows with
+        # nothing beside them, which read as the block having stopped early.
+        lines = self._wrap((body or "").strip("\n"), max(8, width - 2), "")
+        while lines and not lines[-1].strip():
+            lines.pop()
         for l in lines:
-            gap = " " * max(0, inner - dwidth(l))
-            self.emit(f"{col}{pad}{v}{C_OFF} {text_col}{l}{gap}{C_OFF} {col}{v}{C_OFF}")
-        # The tail has to come OUT of the bottom border, not float beneath it.
-        # `┬` puts a downward stub in the border itself and the tail sits
-        # directly under that stub, so the two read as one shape.
-        bottom = f"{bl}{h * (inner + 2)}{br}"
-        at = 3 if len(bottom) > 5 else 1
-        bottom = bottom[:at] + "┬" + bottom[at + 1:]
-        self.emit(f"{col}{pad}{bottom}{C_OFF}")
-        # One line, not two: a bubble per message adds up fast in a long thread.
-        if style == "dotted":
-            self.emit(f"{col}{pad}{' ' * at}╰○ ∘{C_OFF}")
-        else:
-            self.emit(f"{col}{pad}{' ' * at}╰─▸{C_OFF}")
+            self.emit(f"{col}{pad}│{C_OFF} {text_col}{l}{C_OFF}")
+        if foot:
+            self.emit(f"{col}{pad}│{C_OFF} {C_DIM}{foot}{C_OFF}")
 
     def node_body(self, kind, key, rec, h):
         """The text behind one expandable node."""
@@ -593,7 +587,7 @@ class Console:
         return []
 
     def emit(self, text):
-        width = self.scr.getmaxyx()[1]
+        width = getattr(self, "_conv_w", None) or self.scr.getmaxyx()[1]
         for spans in ansi_lines(text):
             self.lines.append(clamp_spans(spans, width))
 
@@ -608,7 +602,10 @@ class Console:
         open_ = nid in self.open
         sign = "−" if open_ else "+"
         pad = "   " * (depth - 1)
-        branch = ("└ " if last else "├ ") if depth > 1 else ""
+        # Plain indentation, no box-drawing. `├`/`└` drew a tree beside rows
+        # that were already indented under their parent, which is the same
+        # information twice and the kind of chrome that read as cartoonish.
+        branch = "  " if depth > 1 else ""
         head = f"{' ' * base}{pad}{branch}"
         text = f"{C_PLUS}{sign}{C_OFF} {label}"
         line_no = len(self.lines)
@@ -648,9 +645,12 @@ class Console:
         """
         self.lines, self.hotspots, self.starts = [], [], []
         self.node_bodies = {}
+        # Wrap to the space LEFT OF THE RAIL, not the whole screen, or every
+        # line runs under it.
+        self._conv_w = max(40, self.scr.getmaxyx()[1] - self.rail_w() - 2)
         self._dash_rec, self._dash_bg = None, False
         self._rec_name = {}
-        W = self.scr.getmaxyx()[1]
+        W = self._conv_w
         self._fetch_flags()
         msgs = T.conversation(self.recs, self.name, self.opts.get("repeats", False))
         P, parties = CAT.PARTY, {}
@@ -670,7 +670,6 @@ class Console:
         except Exception:
             pass
 
-        self.emit(f"\033[1m{' llamatap · group chat '.center(max(10, W - 2), '═')}\033[0m")
         self.emit("")
         self.emit(f"{C_DIM}  in this thread:{C_OFF}  {P['you']} you   "
                   f"{P['harness'].rstrip()} "
@@ -687,7 +686,7 @@ class Console:
             "harness": (P["harness"].rstrip(), "\033[36m"),  # cyan
             "server":  (P["server"].rstrip(),  "\033[37m"),  # white
             "model":   (P["model"],            "\033[33m"),  # yellow
-            "tool":    ("📤",                  "\033[35m"),  # magenta
+            "tool":    ("",                    "\033[35m"),  # magenta
         }
 
         # Which exchange is background, and what harness each belongs to.
@@ -728,11 +727,18 @@ class Console:
                    "tool":    f"{m.get('name')} → tool result",
                    "you":     "you"}.get(m["who"], m["who"])
             kind = m.get("kind") or ""
+            # Indent by party, the way a chat client offsets each speaker.
+            # The model is a reply to whoever just spoke, so it sits deeper.
+            # Computed HERE, before anything reads it: the thinking branch
+            # below used to run first and pick up a stale value left by the
+            # previous message.
+            pad = {"you": 0, "harness": 0, "server": 2, "model": 4,
+                   "tool": 2}.get(m["who"], 0)
             if kind == "thinking":
                 # Same party, so the same colour. Thinking is distinguished by
                 # the dotted outline and lighter text, not by being a different
                 # speaker.
-                icon, who = P["model"] + "💭", f"{model} (thinking)"
+                icon, who = "", f"{model} (thinking)"
                 col = "\033[33m"
             elif kind == "tool call":
                 _c, icon = CAT.classify_tool(m.get("tool"))
@@ -740,7 +746,7 @@ class Console:
             elif kind == "background":
                 who = m.get("name")
             elif kind == "cut off":
-                icon, who, col = "⚠ ", "no reply", "\033[31m"
+                icon, who, col = "", "no reply", "\033[31m"
             elif kind == "setup":
                 # No narration. What this request contains is visible in the
                 # tree underneath it; describing it in prose as well is noise.
@@ -791,8 +797,8 @@ class Console:
                     else:
                         self.open.add(nid)
                 self.emit_node(m.get("rec", 0), self.recs[m.get("rec", 0)], None,
-                               "thinking", key, f"💭 {who}", note, 1, True,
-                               base=12)
+                               "thinking", key, f"Thought: {note}", "", 1, True,
+                               base=2 + pad)
                 continue
             n = m.get("chars", 0)
             stat = f"{n:,} chars · ~{n//4:,} tokens"
@@ -806,17 +812,17 @@ class Console:
             elif kind == "setup" and m.get("prefill_ms"):
                 stat += (f" · {m['prefill_ms']/1000:.1f}s prefill · "
                          f"{m.get('prefill_tps',0):.0f} t/s")
-            # Indent by party, the way a chat client offsets each speaker.
-            # The model is a reply to whoever just spoke, so it sits deeper.
-            pad = {"you": 0, "harness": 0, "server": 2, "model": 4,
-                   "tool": 2}.get(m["who"], 0)
-            head = f"  {m.get('t','')[-8:]}  {' ' * pad}{icon} "
-            lbl = f"{head}{who}"
+            # The name starts the line. A timestamp column used to sit to its
+            # left on EVERY row, costing ten characters of width to repeat the
+            # same minute over and over; it now appears once, dim, at the foot
+            # of the block it belongs to.
+            lbl = f"  {' ' * pad}{icon}{who}".rstrip() if not icon else \
+                  f"  {' ' * pad}{icon} {who}"
             gap = " " * max(2, W - dwidth(lbl) - dwidth(stat) - 3)
             self.emit(f"{col}{lbl}{C_OFF}{gap}{C_DIM}{stat}{C_OFF}")
-            # the bubble sits slightly in from the speaker's name, the way a
-            # chat client insets a message under its sender
-            body_col = 14 + pad
+            # The accent bar sits just in from the name, so the block reads as
+            # belonging to the speaker named above it.
+            body_col = 2 + pad
 
             if kind == "setup":
                 rec = self.recs[m["rec"]]
@@ -825,7 +831,7 @@ class Console:
                 total = max(1, m.get("chars", 1))
                 if pc:
                     self.emit_node(m["rec"], rec, h, "preamble", "system prompt",
-                                   "📜 system prompt",
+                                   "system prompt",
                                    f"{pc:,} chars · ~{pc//4:,} tokens · "
                                    f"{100*pc//total}% of the request", 1, False,
                                    base=body_col)
@@ -836,15 +842,17 @@ class Console:
                         self.node_bodies[("section", key)] = \
                             pre_text[sec["offset"]:sec["offset"] + sec["length"]].split("\n")
                         ic = CAT.section_icon(sec["label"])
+                        # section_icon is empty now; keep the join tidy rather
+                        # than special-casing emptiness inside the catalog.
                         self.emit_node(m["rec"], rec, h, "section", key,
-                                       f"{ic} {sec['label'][:40]}",
+                                       f"{ic} {sec['label'][:40]}".strip(),
                                        f"{sec['length']:,} chars · "
                                        f"{100*sec['length']//max(1,pc)}% of the prompt",
                                        2, k == len(secs_) - 1, base=body_col)
                 tc = m.get("tools_chars", 0)
                 if tc:
                     nid = self.emit_node(m["rec"], rec, h, "tools", "tools",
-                                         f"{CAT.TOOLBOX} {len(m.get('tools') or [])} tools",
+                                         f"{CAT.TOOLBOX} {len(m.get('tools') or [])} tools".strip(),
                                          f"{tc:,} chars · ~{tc//4:,} tokens · "
                                          f"{100*tc//total}% of the request", 1, True,
                                          base=body_col)
@@ -852,7 +860,7 @@ class Console:
                         tl = m.get("tools") or []
                         for k, (tn, desc, size) in enumerate(tl):
                             _c, ic = CAT.classify_tool(tn)
-                            self.emit_node(m["rec"], rec, h, "tool", tn, f"{ic}{tn}",
+                            self.emit_node(m["rec"], rec, h, "tool", tn, f"{ic}{tn}".strip(),
                                            f"{size:,} chars · ~{size//4:,} tokens · "
                                            f"{100*size//max(1,tc)}% of the tools",
                                            2, k == len(tl) - 1, base=body_col)
@@ -897,16 +905,17 @@ class Console:
                     continue
                 avail = max(24, W - body_col - 6)
                 if kind == "thinking":
-                    # dotted outline, lighter text: thinking is not speech
-                    self.bubble(body, "\033[33m", body_col, avail, "dotted",
-                                text_col="\033[37m")
+                    # lighter text: thinking is not speech
+                    self.block(body, "\033[33m", body_col, avail,
+                               text_col=C_BODY, foot=m.get("t", "")[-8:-3])
                 elif kind == "cut off":
                     # Worth recording, not worth alarming about: the harness
                     # abandoned its own background request. One dim line.
                     for ln in self._wrap(body, avail, " " * body_col):
                         self.emit(f"\033[33m{ln}{C_OFF}")
                 elif m["who"] in ("you", "model", "harness", "tool"):
-                    self.bubble(body, col, body_col, avail, "solid")
+                    self.block(body, col, body_col, avail,
+                               foot=m.get("t", "")[-8:-3])
                 else:
                     for ln in self._wrap(body, avail, " " * body_col):
                         self.emit(f"{C_BODY}{ln}{C_OFF}")
@@ -924,14 +933,14 @@ class Console:
             sp = SPIN[self.tick % len(SPIN)]
             mdl = job.get("model") or model
             if think and not text:
-                self.emit(f"\033[33m      live      {CAT.PARTY['model']}💭 {mdl} "
+                self.emit(f"\033[33m      live      {mdl} (thinking) "
                           f"(thinking) {sp}{C_OFF}")
-                self.bubble(think, "\033[33m", 16, max(24, W2 - 22), "dotted",
-                            text_col="\033[37m")
+                self.block(think, "\033[33m", 16, max(24, W2 - 22),
+                           text_col=C_BODY)
             if text:
                 self.emit(f"\033[33m      live      {CAT.PARTY['model']} {mdl} "
                           f"{sp}{C_OFF}")
-                self.bubble(text, "\033[33m", 16, max(24, W2 - 22), "solid")
+                self.block(text, "\033[33m", 16, max(24, W2 - 22))
 
         for e in self.extra:
             self.emit(e)
@@ -982,7 +991,7 @@ class Console:
         Drawn here rather than reused from the text renderer: a boxed panel is
         console chrome and makes no sense in a pipeable dump.
         """
-        full = max(40, W - 2)
+        full = max(16, W - 2)
         live = self.live_rows(full - 2)
         if not self.recs:
             return live + [("  waiting for the first request…", curses.color_pair(6))]
@@ -1005,15 +1014,14 @@ class Console:
 
         # Column widths. Session Totals carries the context gauge — the
         # number you actually watch — so it is no longer the runt.
-        c1 = max(30, int(full * 0.32))
-        c3 = max(30, int(full * 0.30))
-        c2 = full - c1 - c3 - 2          # two dividers
+        # One column now, so every panel is laid out at the rail's width.
+        c1 = c2 = c3 = full
 
         cmd = getattr(self, "_flags", "") or ""
 
         # Label widths adapt: a fixed 16 cells left only 14 for the value in
         # a narrow terminal, which sliced model names mid-string.
-        L = max(9, min(16, c2 - 18, c1 - 14))
+        L = max(9, min(16, c1 - 10))
 
         def kv(label, value, attr=0):
             return [(f"{label:<{L}}", curses.color_pair(6)), (str(value), attr)]
@@ -1096,7 +1104,7 @@ class Console:
             dec_ms += t_.get("predicted_ms") or 0
             pre_tok += t_.get("prompt_n") or 0
             pre_ms += t_.get("prompt_ms") or 0
-        S = max(9, min(17, c3 - 13))     # this panel's labels are the longest
+        S = max(9, min(17, c3 - 9))      # this panel's labels are the longest
         def kv3(label, value, attr=0):
             return [(f"{label:<{S}}", curses.color_pair(6)), (str(value), attr)]
 
@@ -1128,105 +1136,80 @@ class Console:
                             curses.color_pair(6) | curses.A_BOLD))
         col3.append(kv3("Model Time", f"{total_s:.0f} seconds"))
 
-        def hdr(label, w):
-            """Centred panel title. The three panels are distinguished by TIME
-            SCALE — configuration, this turn, the whole session — so their
-            titles are parallel noun phrases in Title Case."""
-            t = f" {label} "
-            pad = max(0, w - dwidth(t))
-            left = pad // 2
-            return "─" * left + t + "─" * (pad - left)
+        # Composed as a narrow vertical rail, not three bordered panels side
+        # by side. The panels are the SAME three lists — col1 identity, col2
+        # this turn, col3 the session — stacked in the same time-scale order,
+        # so no statistic can be lost by restyling. What goes is the border
+        # art and the horizontal space it needed at the bottom of the screen.
+        def heading(text):
+            return ([(text, curses.A_BOLD | curses.color_pair(6))], 0)
 
         rows = list(live)
-        # Not "latest request" — it deliberately skips background calls, so it
-        # is the last turn of YOUR conversation.
-        rows.append((f"╭{hdr('Model Details', c1)}┬{hdr('Current Request', c2)}"
-                     f"┬{hdr('Session Totals', c3)}╮",
-                     curses.A_BOLD | curses.color_pair(6)))
-        def spans_of(cell, width, base=0):
-            """A column cell -> [(text, attr)] padded to exactly `width`."""
-            if cell is None:
-                return [(" " * width, 0)]
-            if isinstance(cell, str):
-                return [(fit(" " + cell, width), base)]
-            out, used = [(" ", 0)], 1
-            for txt, att in cell:
-                room = width - used
-                if room <= 0:
-                    break
-                t = fit(txt, min(room, dwidth(txt)))
-                out.append((t, att))
-                used += dwidth(t)
-            if used < width:
-                out.append((" " * (width - used), 0))
-            return out
-
-        div = [("│", curses.color_pair(6))]
-        body = max(len(col1), len(col2), len(col3))
-        # Hard cap: the conversation is what you came to read. Three columns
-        # pad to the tallest, so without this one long column (the 14-row
-        # settings board) decides how much of the screen is left.
-        H = self.scr.getmaxyx()[0]
-        room = max(4, int(H * 0.40) - 3)       # minus two borders and a hint
-        clipped = body - room if body > room else 0
-        if clipped:
-            body = room
-        for i in range(body):
-            segs = list(div)
-            segs += spans_of(col1[i] if i < len(col1) else None, c1)
-            segs += div
-            segs += spans_of(col2[i] if i < len(col2) else None, c2)
-            segs += div
-            segs += spans_of(col3[i] if i < len(col3) else None, c3)
-            segs += div
-            rows.append((segs, 0))
-        if clipped:
-            note = (f" {clipped} more rows — widen"
-                    + (" or press f to hide settings " if self.opts.get("flags")
-                       else " the window "))
-            pad = max(0, full - dwidth(note))
-            rows.append((f"│{note}{' ' * pad}│", curses.color_pair(3)))
-        if cmd:
+        for title, col in (("Session", col3), ("This turn", col2),
+                           ("Model", col1)):
+            if not col:
+                continue
+            if rows and rows[-1] != ("", 0):
+                rows.append(("", 0))
+            rows.append(heading(title))
+            for cell in col:
+                if cell is None:
+                    rows.append(("", 0))
+                elif isinstance(cell, str):
+                    rows.append((cell, 0))
+                elif not cell[0][0].strip():
+                    # A continuation row — blank label, value only. It kept
+                    # the label column's padding, which in a rail left the
+                    # value stranded sixteen spaces from the edge.
+                    body = "".join(t for t, _ in cell).strip()
+                    for piece in self._wrap(body, max(8, W - 3), ""):
+                        rows.append(([("  " + piece, cell[-1][1])], 0))
+                elif dwidth("".join(t for t, _ in cell)) <= W - 1:
+                    rows.append((list(cell), 0))
+                else:
+                    # Too wide for the rail: label on its own line, value
+                    # indented under it. A 17-cell label plus a value does not
+                    # fit a 30-cell column, and squeezing them onto one line
+                    # truncated the value — which is the half worth reading.
+                    label = cell[0][0].rstrip()
+                    rest = [(t, a) for t, a in cell[1:] if t.strip()]
+                    if label:
+                        rows.append(([(label, cell[0][1])], 0))
+                    for t, a in rest:
+                        for piece in self._wrap(t, max(8, W - 3), ""):
+                            rows.append(([("  " + piece, a)], 0))
+        if cmd and self.opts.get("flags"):
             short = re.sub(r"\S*llama-server\s*|-m \S+\s*|--alias \S+\s*"
                            r"|--port \S+\s*|--host \S+\s*", "", cmd)
-            # A cached command may describe a previous launch, so date it
-            # rather than presenting it as the running one.
-            age = getattr(self, "_flags_age", None)
-            if getattr(self, "_flags_src", "") == "cached" and age:
-                mins = age / 60
-                stale = (f"  (cached {mins:.0f} min ago)" if mins < 90
-                         else f"  (cached {mins/60:.0f} h ago)")
-            elif getattr(self, "_flags_src", "") == "config":
-                stale = "  (from the config file, not the running process)"
-            else:
-                stale = ""
-            rows.append((f"├{'─' * c1}┴{'─' * c2}┴{'─' * c3}┤", curses.color_pair(6)))
-            bar = [("│", curses.color_pair(6))]
-            rows.append((bar
-                         + [(fit(" $ " + short.strip(),
-                                 max(0, full - dwidth(stale))), 0),
-                            (stale, curses.color_pair(3))]
-                         + bar, 0))
-            rows.append((f"╰{'─' * full}╯", curses.color_pair(6)))
-        else:
-            # Say why it is absent rather than just omitting the row: it needs
-            # the ssh agent to read llama-swap's YAML, and a silent gap looks
-            # like the model was launched with no flags at all.
-            why = getattr(self, "_flags_err", "") or (
-                "reading launch flags…" if not getattr(self, "_flags_started", False)
-                else "launch command unavailable")
-            rows.append((f"├{'─' * c1}┴{'─' * c2}┴{'─' * c3}┤", curses.color_pair(6)))
-            rows.append((f"│{fit(' $ ' + why, full)}│", curses.color_pair(3)))
-            rows.append((f"╰{'─' * full}╯", curses.color_pair(6)))
+            rows.append(("", 0))
+            rows.append(heading("Launched with"))
+            for piece in self._wrap(short.strip(), max(10, W - 2), ""):
+                rows.append((piece, curses.color_pair(6)))
+
         return rows
 
     # -------------------------------------------------------------------- layout
+    def rail_w(self):
+        """Columns the stats rail occupies, or 0 when it is hidden.
+
+        The dashboard used to sit across the bottom, which cost ten to twenty
+        ROWS of a conversation that is the point of the tool. A rail costs
+        columns instead, of which a wide terminal has plenty — and it is
+        hidden entirely on a narrow one, where there are none to spare.
+        """
+        if not self.opts.get("stats", True):
+            return 0
+        cols = self.scr.getmaxyx()[1]
+        if cols < 80:
+            return 0
+        return max(24, min(34, cols // 4))
+
     def dash_h(self):
         return len(self.dash(self.scr.getmaxyx()[1]))
 
     def view_h(self):
-        # conversation + separator + dash + status + command line
-        return max(1, self.scr.getmaxyx()[0] - self.dash_h() - 3)
+        # conversation + status + command line. The stats no longer take rows.
+        return max(1, self.scr.getmaxyx()[0] - 2)
 
     def to_bottom(self):
         """Prefer the START of the last exchange over the absolute bottom.
@@ -1327,18 +1310,28 @@ class Console:
             if nm:
                 crumb = f" · in #{ri_here + 1} {nm}" + (" ⟨BACKGROUND⟩" if bg else "")
         pos = "FOLLOWING" if self.follow else f"line {self.top+1}/{max(1,len(self.lines))}"
-        tag = f"─ live ─ {pos}{crumb} "
+        tag = f" {pos}{crumb} "
         try:
-            scr.addnstr(vh, 0, (tag + "─" * W)[:W - 1], W - 1, curses.color_pair(6))
+            scr.addnstr(H - 2, 0, tag.ljust(W - 1)[:W - 1], W - 1,
+                        curses.color_pair(6))
         except curses.error:
             pass
 
-        for r, (txt, attr) in enumerate(self.dash(W)):
-            y = vh + 1 + r
+        # The rail, down the right-hand side rather than across the bottom.
+        rw = self.rail_w()
+        if rw:
+            x0 = W - rw
+            for y in range(0, H - 2):
+                try:
+                    scr.addnstr(y, x0 - 1, "│", 1, curses.color_pair(6))
+                except curses.error:
+                    pass
+        for r, (txt, attr) in enumerate(self.dash(rw) if rw else []):
+            y = r
             if y >= H - 2:
                 break
             if isinstance(txt, list):
-                x = 1
+                x = W - rw + 1
                 for seg, a in txt:
                     if x >= W - 1:
                         break
@@ -1349,7 +1342,7 @@ class Console:
                     x += dwidth(seg)
             else:
                 try:
-                    scr.addnstr(y, 1, txt, W - 2, attr)
+                    scr.addnstr(y, W - rw + 1, txt, rw - 2, attr)
                 except curses.error:
                     pass
 
@@ -1513,6 +1506,11 @@ class Console:
                 if not self.opts["repeats"]:
                     self.open = {n for n in self.open if n[1] != "repeat"}
                 self.rebuild()
+        elif c in ("stats", "panel", "rail"):
+            self.opts["stats"] = not self.opts.get("stats", True)
+            self.rebuild()
+            self.note("stats rail hidden" if not self.opts["stats"]
+                      else "stats rail shown")
         elif c in ("thinking", "think"):
             arg = (args[0].lower() if args else "")
             # These set the DEFAULT for every thought, so they also clear any
@@ -1530,7 +1528,7 @@ class Console:
             else:
                 self.opts["fold_thinking"] = not self.opts.get("fold_thinking", False)
                 self.rebuild()
-                self.note("thinking folded — click a 💭 line to open one"
+                self.note("thinking folded — click a Thought line to open one"
                           if self.opts["fold_thinking"] else "thinking shown in full")
         elif c == "preamble":
             pre = [nid for (_l, _a, _b, nid) in self.hotspots if nid[1] == "preamble"]
@@ -1909,6 +1907,8 @@ class Console:
                     self.opts["flags"] = not self.opts["flags"]; self.rebuild()
                 elif ch == ord("t"):
                     self.run_cmd("thinking")
+                elif ch == ord("s"):
+                    self.run_cmd("stats")
                 elif ch == curses.KEY_RESIZE:
                     self.rebuild()
                 if self.top >= max(0, len(self.lines) - vh):
@@ -1970,7 +1970,7 @@ def main():
     # The launch-settings board is twenty rows; it would own the screen. Off by
     # default, shown with /flags when you want to know how the server was told
     # to run.
-    opts = {"rawjson": a.raw_json,
+    opts = {"rawjson": a.raw_json, "stats": True,
             # Off by default: folding changes what the thread looks like, and
             # the default should be "show me everything that happened".
             "fold_thinking": a.fold_thinking,
