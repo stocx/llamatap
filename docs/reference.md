@@ -151,6 +151,12 @@ A tool result filters with the harness, not with you: it comes back from the
 harness process, which is also why it is labelled `<harness> → tool result`
 rather than attributed to a person.
 
+llama-server speaks when a request fails. Any non-2xx response becomes a
+`llama-server → error` block carrying the status and the response body, which
+is both what makes its name a working filter and the only way a 500, a 503 or
+a refused connection is visible at all — those used to leave a silent gap in
+the thread.
+
 **The filter changes what you read, never what is counted.** It is applied
 after the statistics are derived, so hiding the model does not alter a single
 number in the dashboard.

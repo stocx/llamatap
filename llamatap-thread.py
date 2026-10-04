@@ -1142,6 +1142,26 @@ def conversation(recs, name_hint=None, show_repeats=False):
                 m["secs_estimated"] = False
                 m["tps"] = tmg.get("predicted_per_second", 0)
             msgs.append(m)
+
+        # llama-server's own voice. A non-2xx response produced NO message at
+        # all, so a 500, a 503 or a refused connection left a silent gap in
+        # the thread — the one failure mode this tool exists to catch was the
+        # one thing it could not show. It is also what makes the server a
+        # participant rather than a name in the header that filters nothing.
+        st = rec.get("status")
+        if isinstance(st, int) and not 200 <= st < 300:
+            why = (rec.get("error") or "").strip()
+            if not why:
+                raw = rec.get("resp")
+                why = raw.strip() if isinstance(raw, str) else ""
+            # Bounded. An upstream that returns an HTML error page would
+            # otherwise paste the whole page into the conversation.
+            if len(why) > 2000:
+                why = why[:2000] + f"\n… {len(why) - 2000:,} more characters"
+            msgs.append({"t": t, "rec": ri, "name": "llama-server",
+                         "who": "server", "kind": "error",
+                         "text": f"HTTP {st}\n{why or 'no response body'}",
+                         "chars": len(why), "repeat": False})
     return msgs
 
 

@@ -1956,3 +1956,132 @@ class ToolCallsAreBlocks(TapTest):
     def test_the_old_gutter_glyph_is_gone(self):
         for row in self.body(self.console()):
             self.assertNotIn("│", row, f"the old gutter is back: {row!r}")
+
+
+def a_failed_record(i=0, status=503, body="upstream slot unavailable"):
+    return {
+        "t": f"2026-10-04T13:0{i}:00", "path": "/v1/chat/completions",
+        "status": status,
+        "req": {"model": "qwen", "messages": [
+            {"role": "system", "content": "be terse"},
+            {"role": "user", "content": "hello"}]},
+        "resp": body,
+        "meta": {"elapsed_ms": 40}}
+
+
+class TheServerSpeaksWhenItFails(TapTest):
+    """A non-2xx response produced no message at all, so a 500, a 503 or a
+    refused connection left a silent gap in the thread — and the llama-server
+    chip in the header filtered nothing, because nothing was ever attributed
+    to the server."""
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+        self.T = load("thread")
+
+    def test_a_failure_becomes_a_server_message(self):
+        msgs = self.T.conversation([a_failed_record()], None, False)
+        srv = [m for m in msgs if m["who"] == "server"]
+        self.assertEqual(len(srv), 1, "a 503 produced no server message")
+        self.assertEqual(srv[0]["kind"], "error")
+        self.assertIn("503", srv[0]["text"])
+        self.assertIn("slot unavailable", srv[0]["text"])
+
+    def test_a_success_produces_no_server_message(self):
+        msgs = self.T.conversation([a_record(0)], None, False)
+        self.assertEqual([m for m in msgs if m["who"] == "server"], [])
+
+    def test_every_non_2xx_status_speaks(self):
+        for st in (400, 404, 429, 500, 502, 503):
+            with self.subTest(status=st):
+                msgs = self.T.conversation([a_failed_record(0, st)], None, False)
+                self.assertTrue([m for m in msgs if m["who"] == "server"],
+                                f"HTTP {st} was silent")
+
+    def test_2xx_is_never_an_error(self):
+        for st in (200, 201, 204):
+            with self.subTest(status=st):
+                msgs = self.T.conversation(
+                    [a_failed_record(0, st)], None, False)
+                self.assertEqual([m for m in msgs if m["who"] == "server"], [],
+                                 f"HTTP {st} was reported as a failure")
+
+    def test_an_empty_body_still_says_something(self):
+        """A bare status with no body must not render as a blank block."""
+        msgs = self.T.conversation([a_failed_record(0, 500, "")], None, False)
+        srv = [m for m in msgs if m["who"] == "server"][0]
+        self.assertIn("no response body", srv["text"])
+
+    def test_a_huge_body_is_bounded(self):
+        """An upstream returning an HTML error page must not paste the whole
+        page into the conversation."""
+        msgs = self.T.conversation(
+            [a_failed_record(0, 500, "x" * 50000)], None, False)
+        srv = [m for m in msgs if m["who"] == "server"][0]
+        self.assertLess(len(srv["text"]), 3000, "the error body is unbounded")
+        self.assertIn("more characters", srv["text"],
+                      "truncation is silent")
+
+    def test_a_missing_status_is_not_an_error(self):
+        rec = a_failed_record()
+        del rec["status"]
+        msgs = self.T.conversation([rec], None, False)
+        self.assertEqual([m for m in msgs if m["who"] == "server"], [])
+
+    def test_the_server_chip_now_filters_something(self):
+        """The point of the exercise: the header row's fourth name was a
+        control that could not do anything."""
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        def build(show):
+            c = C.Console.__new__(C.Console)
+            c.scr = Screen(); c.recs = [a_record(0), a_failed_record(1)]
+            c.name = None; c.extra = []; c.follow = False; c.top = 0
+            c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                      "repeats": False, "fold_thinking": True, "stats": "off"}
+            c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+            c.menu = []; c.detail = None; c.node_bodies = {}
+            c.show = set(show); c.chips = []
+            c.inflight = []; c.msg = ""; c.msg_until = 0; c.tick = 0
+            c.cmd = None; c.busy = ""
+            c._flags = ""; c._flags_started = True; c._flags_err = ""
+            c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+            c.rebuild()
+            return "\n".join("".join(ch for _, ch, _ in s) for s in c.lines)
+
+        with_srv = build(C.PARTIES)
+        self.assertIn("503", with_srv, "the failure never reached the screen")
+        without = build([p for p in C.PARTIES if p != "server"])
+        self.assertNotIn("503", without,
+                         "hiding llama-server did not hide its message")
+
+    def test_the_error_is_a_block_like_everything_else(self):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_failed_record()]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.msg = ""; c.msg_until = 0; c.tick = 0
+        c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        rows = ["".join(ch for _, ch, _ in s).rstrip() for s in c.lines]
+        self.assertTrue(any("→ error" in l for l in rows),
+                        "the error has no speaker row")
+        self.assertTrue(any(C.BAR in l and "503" in l for l in rows),
+                        "the error text is not in a block")

@@ -984,6 +984,12 @@ class Console:
                 who, col = f"{model} → {m.get('tool')}()", "\033[33m"
             elif kind == "background":
                 who = m.get("name")
+            elif kind == "error":
+                # Named like every other thing a party does — `→ thinking`,
+                # `→ tool result`. The block keeps the SERVER's colour rather
+                # than turning red: one colour per party is the rule, and the
+                # text says HTTP 503 on its first line.
+                who = f"{m.get('name')} → error"
             elif kind == "cut off":
                 icon, who, col = "", "no reply", "\033[31m"
             elif kind == "setup":
@@ -1190,7 +1196,7 @@ class Console:
                     # abandoned its own background request. One dim line.
                     for ln in self._wrap(body, avail, " " * body_col):
                         self.emit(f"\033[33m{ln}{C_OFF}")
-                elif m["who"] in ("you", "model", "harness", "tool"):
+                elif m["who"] in ("you", "model", "harness", "tool", "server"):
                     self.block(body, col, body_col, avail,
                                foot=clock(m.get("t", "")))
                 else:
