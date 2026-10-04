@@ -1128,7 +1128,9 @@ class FilledBackground(TapTest):
         for rows, cols in ((40, 160), (40, 200)):
             with self.subTest(rows=rows, cols=cols):
                 g = self.cells(rows, cols, stats="bottom")
-                vh = next(y for y in range(rows)
+                # From below the header: it now draws a rule of its own, and
+                # searching from row 0 found THAT and called it the panel.
+                vh = next(y for y in range(self.C.HEADER_H, rows)
                           if "".join(ch for ch, _ in g[y]).strip().startswith("─"))
                 bad = self.unfilled(g, range(vh, rows - 2), 0, cols - 1)
                 self.assertEqual(bad[:6], [],
@@ -2536,3 +2538,54 @@ class BlocksStartAtTheLeftEdge(TapTest):
                 if C.BAR in l}
         self.assertEqual(cols, {C.LEFT},
                          f"accent bars are not all at column {C.LEFT}: {cols}")
+
+    def test_a_rule_separates_the_header_from_the_conversation(self):
+        """The header is a filled panel and so is every block below it, so
+        with nothing between them the party names read as the first line of
+        the conversation rather than as a control above it."""
+        C = self.C
+        rows, cols = 40, 140
+        cells = [[" "] * cols for _ in range(rows)]
+
+        class Screen:
+            def getmaxyx(self):
+                return (rows, cols)
+
+            def erase(self):
+                for r in cells:
+                    r[:] = [" "] * cols
+
+            def refresh(self):
+                pass
+
+            def addnstr(self, y, x, text, n, attr=0):
+                for ch in text[:max(0, n)]:
+                    if x >= cols:
+                        return
+                    cells[y][x] = ch
+                    x += 1
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(0)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.msg = ""; c.msg_until = 0; c.tick = 0
+        c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild(); c.draw()
+        rule = "".join(cells[self.C.HEADER_H - 1])
+        self.assertGreater(rule.count("─"), cols // 2,
+                           f"no rule under the header: {rule[:40]!r}")
+        names = "".join(cells[0])
+        self.assertIn("in this thread", names,
+                      "the rule was drawn over the party names")
+
+    def test_the_header_height_accounts_for_the_rule(self):
+        """Everything downstream reads HEADER_H, so the rule must be inside
+        it — otherwise the first transcript row lands under the rule."""
+        self.assertGreaterEqual(self.C.HEADER_H, 2)

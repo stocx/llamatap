@@ -208,9 +208,11 @@ PANEL_CODE = {"\033[31m": "\033[106m", "\033[32m": "\033[101m",
 #: "<harness> → tool result" rather than attributed to the user.
 PARTIES = ("you", "harness", "server", "model")
 
-#: Rows the pinned header occupies. Named so the three places that have to
-#: agree — view_h(), the draw offset and hotspot_at() — cannot drift.
-HEADER_H = 1
+#: Rows the pinned header occupies: the party row, and a rule under it.
+#: Named so everything that has to agree — view_h(), the draw offset,
+#: hotspot_at(), the rail and the clipping threshold — cannot drift. Changing
+#: this number is the whole edit.
+HEADER_H = 2
 PARTY_OF = {"you": "you", "harness": "harness", "server": "server",
             "model": "model", "tool": "harness"}
 
@@ -1874,6 +1876,15 @@ class Console:
                 scr.addnstr(0, x0, label, W - 1 - x0, attr)
             except curses.error:
                 pass
+        # A rule under it. The header is a filled panel and so is every block
+        # below it, so with nothing between them the party names read as the
+        # first line of the conversation rather than as a control above it.
+        self.fill(HEADER_H - 1, 0, W - 1)
+        try:
+            scr.addnstr(HEADER_H - 1, 0, "─" * (W - 1), W - 1,
+                        panelise(curses.color_pair(6)))
+        except curses.error:
+            pass
 
     def draw(self):
         scr = self.scr
