@@ -103,32 +103,63 @@ thought-bubble tail, because thinking is not speech.
 
 ## The console
 
-One chronological stream, participants listed once at the top, no per-exchange
-headers. Every message appears where it happened; a `+` opens structure in
-place.
+One chronological stream, the participants pinned in a header row, no
+per-exchange headers. Every message appears where it happened; a `+` opens
+structure in place.
 
 ```
-  in this thread: you · opencode (harness) · llama-server b11040 · qwen3.5-35b-moe
+  in this thread:  you   opencode   llama-server b11040   qwen3.5-35b-moe
 
   opencode                              45,724 chars · ~11,431 tokens · 11.4s prefill
-  + system prompt   23,022 chars · 50% of the request
-       + Tone and style        2,290 chars ·  9% of the prompt
-       + <available_skills>   14,018 chars · 60% of the prompt
-  + 11 tools        22,702 chars · 49% of the request
+  ▌ + system prompt   23,022 chars · 50% of the request
+  ▌      + Tone and style        2,290 chars ·  9% of the prompt
+  ▌      + <available_skills>   14,018 chars · 60% of the prompt
+  ▌ + 11 tools        22,702 chars · 49% of the request
 
   you                                                       5 chars · ~1 tokens
-  │ hello
-  │ 12:56
+  ▌ hello
+  ▌ 12:56pm
 
-  + Thought: ~26 tokens · ~0.5s
+  qwen3.5-35b-moe → thinking                            ~26 tokens · ~0.5s
+  ▌ + Thought
 
-      qwen3.5-35b-moe                              34 tokens · 0.6s · 57/sec
-      │ Hello. What would you like to do?
-      │ 12:56
+  qwen3.5-35b-moe                              34 tokens · 0.6s · 57/sec
+  ▌ Hello. What would you like to do?
+  ▌ 12:56pm
 ```
+
+Each block is a filled panel behind an accent bar in the speaker's colour.
+The speaker's name sits above the bar with that message's cost beside it, so
+the block itself holds nothing but the text — including for a thought, which
+is labelled `→ thinking` the same way a tool result is labelled
+`→ tool result`.
+
+Times are 12-hour. The recordings keep ISO timestamps, which sort and never
+need a timezone; only the display is converted.
+
+### The header row filters the conversation
+
+The four participants are a **pinned row**, not the first line of the
+transcript — they used to scroll away, and they are now the filter control.
+
+**Click a name to show or hide that party.** All four are on by default; a
+dimmed name is a party whose messages are being withheld, which stays visible
+so a filtered view can never be mistaken for a quiet session. Any combination
+works, including none.
+
+A tool result filters with the harness, not with you: it comes back from the
+harness process, which is also why it is labelled `<harness> → tool result`
+rather than attributed to a person.
+
+**The filter changes what you read, never what is counted.** It is applied
+after the statistics are derived, so hiding the model does not alter a single
+number in the dashboard.
 
 Streaming is live: a message appears as it arrives, with a spinner and the
 running token count, before `usage` and `timings` land in the final chunks.
+**The view follows the stream** down to the newest row while it is being
+written, and goes back to showing each finished message whole once it lands.
+Scrolling up stops the following, as it does anywhere else.
 
 ### The dashboard
 
@@ -218,6 +249,7 @@ row and always shown; the two no longer share a toggle.
     G                jump to the newest message and follow new ones
     click a node row expand or collapse it — anywhere on the line, not just
                      the + itself
+    click a name     in the header row: show or hide that party
     x                number the expandable nodes, then press 1-9 to toggle
     o / O            expand all in this exchange / collapse everything
     r                tool-call arguments: raw JSON off the wire vs readable
@@ -304,14 +336,18 @@ scrolling past all of it.
 **Every thought is a `+`/`−` node from the start**, like anything else that
 opens. Click one to collapse it:
 
-    − 💭 qwen3.5-35b-moe (thinking)   ~1,370 tokens · ~22.4s     expanded
-    + 💭 qwen3.5-35b-moe (thinking)   ~1,370 tokens · ~22.4s     collapsed
+    qwen3.5-35b-moe → thinking            ~1,370 tokens · ~22.4s
+    ▌ − Thought                                                  expanded
+    ▌ + Thought                                                  collapsed
+
+The cost is on the name row, outside the block — so folding still never
+hides what the thought spent.
 
 `/thinking` sets the default for all of them at once:
 
 | | |
 |---|---|
-| click a `💭` row | collapse or expand just that one, any time |
+| click a `Thought` row | collapse or expand just that one, any time |
 | `/thinking` or `t` | flip the default: folded ⇄ full. **Full is the default** |
 | `/thinking close` | fold every one |
 | `/thinking open` | expand every one |

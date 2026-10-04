@@ -91,8 +91,8 @@ usage: llamatap <command> [options]
   serve            run the proxy in the foreground on :${LLAMATAP_PORT:-9293}
                    (ctrl-c to stop). Archives the previous recording and
                    starts clean; pass --keep to append to it instead.
-  console          LIVE group chat with the dashboard pinned below. This is
-                   the one you want.
+  console          LIVE group chat, with the statistics on the right, across
+                   the bottom, or hidden. This is the one you want.
   list             numbered index of the recording
   read [N]         render exchange N as text (default: the most recent)
   all              render every recorded exchange
@@ -126,6 +126,12 @@ options for replay
   --model <name>   replay against this model instead; repeat to compare several
   --diff           also print the original reply, for comparison
   --max-tokens N   override max_tokens for the replay
+
+options for console
+  --stats right|bottom|off   where the statistics go (default: right).
+                   The right rail is slim and costs columns; the bottom panel
+                   is the full three-panel view and costs rows; s cycles them.
+  --fold-thinking  start with the model's thinking folded to one line
 
 options for read / follow / all
   --raw            raw JSON, no prose, no panels, no icons

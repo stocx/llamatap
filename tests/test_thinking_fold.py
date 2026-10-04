@@ -77,7 +77,7 @@ class ThinkingFold(TapTest):
         c.starts = []
         c.menu = []
         c.detail = None
-        c.node_bodies = {}
+        c.node_bodies = {}; c.show = set(C.PARTIES); c.chips = []
         c.inflight = []
         c.msg = ""
         c.msg_until = 0
@@ -108,7 +108,7 @@ class ThinkingFold(TapTest):
 
     def test_it_starts_expanded_with_a_minus(self):
         body = self.text_of(self.console(fold=False))
-        row = next(l for l in body.split("\n") if "Thought:" in l)
+        row = next(l for l in body.split("\n") if "Thought" in l)
         self.assertIn("−", row, f"expected an open node marker: {row!r}")
 
     def test_one_thought_can_be_closed_on_its_own(self):
@@ -117,7 +117,7 @@ class ThinkingFold(TapTest):
         before = len(c.lines)
         c.toggle(nodes[0])
         self.assertLess(len(c.lines), before, "closing one changed nothing")
-        rows = [l for l in self.text_of(c).split("\n") if "Thought:" in l]
+        rows = [l for l in self.text_of(c).split("\n") if "Thought" in l]
         self.assertIn("+", rows[0], "the clicked thought did not close")
         self.assertIn("−", rows[1], "closing one closed the others too")
 
@@ -126,7 +126,7 @@ class ThinkingFold(TapTest):
         nodes = [n for (_l, _a, _b, n) in c.hotspots if n[1] == "thinking"]
         c.toggle(nodes[0])
         c.rebuild()
-        rows = [l for l in self.text_of(c).split("\n") if "Thought:" in l]
+        rows = [l for l in self.text_of(c).split("\n") if "Thought" in l]
         self.assertIn("+", rows[0],
                       "the default reopened a thought the user had closed")
 
@@ -136,7 +136,7 @@ class ThinkingFold(TapTest):
         nodes = [n for (_l, _a, _b, n) in c.hotspots if n[1] == "thinking"]
         c.toggle(nodes[0])                      # open one by hand
         c.run_cmd("thinking close")
-        for row in [l for l in self.text_of(c).split("\n") if "Thought:" in l]:
+        for row in [l for l in self.text_of(c).split("\n") if "Thought" in l]:
             self.assertIn("+", row, "a hand-opened thought stayed open")
 
     def test_folded_hides_the_text(self):
@@ -149,14 +149,30 @@ class ThinkingFold(TapTest):
                         len(self.console().lines),
                         "folding did not save any rows")
 
-    def test_folded_still_states_the_cost(self):
-        """The point of the collapsed row."""
+    def test_thinking_has_a_speaker_row(self):
+        """It was the one block on screen with no name above it, so a thought
+        read as belonging to whoever spoke last."""
         body = self.text_of(self.console(fold=True))
-        self.assertIn("Thought:", body, "no folded thinking row at all")
-        row = next(l for l in body.split("\n") if "Thought:" in l)
-        self.assertIn("tokens", row, f"no token count on the folded row: {row!r}")
+        self.assertIn("→ thinking", body,
+                      "no speaker row above the thought")
+
+    def test_folded_still_states_the_cost(self):
+        """The point of the collapsed row — the cost is now on the SPEAKER
+        row, beside the name, the way a tool result carries its stats."""
+        body = self.text_of(self.console(fold=True))
+        self.assertIn("Thought", body, "no folded thinking row at all")
+        row = next(l for l in body.split("\n") if "→ thinking" in l)
+        self.assertIn("tokens", row, f"no token count beside the name: {row!r}")
         self.assertRegex(row, r"\d+\.\d+s|\d+s",
-                         f"no duration on the folded row: {row!r}")
+                         f"no duration beside the name: {row!r}")
+
+    def test_the_cost_is_outside_the_block(self):
+        """`▌ − Thought: 31 tokens · 0.4s` put the meta inside the bar, where
+        every other block keeps only its text."""
+        body = self.text_of(self.console(fold=False))
+        row = next(l for l in body.split("\n") if "Thought" in l)
+        self.assertNotIn("tokens", row,
+                         f"the cost is still inside the block: {row!r}")
 
     def test_an_unknown_duration_is_stated_not_omitted(self):
         """A row with only a token count looks like a thought that was free."""
@@ -175,12 +191,13 @@ class ThinkingFold(TapTest):
                   "repeats": False, "fold_thinking": True, "stats": "right"}
         c.open = set(); c.touched = set()
         c.hover = None; c.hotspots = []; c.starts = []
-        c.menu = []; c.detail = None; c.node_bodies = {}; c.inflight = []
+        c.menu = []; c.detail = None; c.node_bodies = {}; c.show = set(C.PARTIES); c.chips = []; c.inflight = []
         c.msg = ""; c.msg_until = 0; c.tick = 0
         c._flags = ""; c._flags_started = True; c._flags_err = ""
         c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
         c.rebuild()
-        row = next((l for l in self.text_of(c).split("\n") if "Thought:" in l), "")
+        row = next((l for l in self.text_of(c).split("\n")
+                    if "→ thinking" in l), "")
         self.assertTrue("s" in row.split("tokens")[-1] or "unknown" in row,
                         f"neither a duration nor a reason for its absence: {row!r}")
 
@@ -197,8 +214,8 @@ class ThinkingFold(TapTest):
                       "opening one node did not reveal its text")
         # and the other is still shut
         self.assertEqual(
-            sum(1 for l in body.split("\n") if l.strip().startswith("+ Thought:")
-                or "+ Thought:" in l), 1,
+            sum(1 for l in body.split("\n") if l.strip().startswith("+ Thought")
+                or "+ Thought" in l), 1,
             "the second thought did not stay folded")
 
     def test_open_all_then_close_all(self):
@@ -208,7 +225,7 @@ class ThinkingFold(TapTest):
         self.assertFalse(c.opts["fold_thinking"])
         c.run_cmd("thinking close")
         self.assertNotIn("Let me work through this", self.text_of(c))
-        self.assertIn("Thought:", self.text_of(c), "the folded rows disappeared")
+        self.assertIn("Thought", self.text_of(c), "the folded rows disappeared")
 
     def test_the_bare_command_toggles(self):
         c = self.console(fold=False)

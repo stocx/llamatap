@@ -39,9 +39,15 @@ def _curses_stub():
     screen object, which tests supply themselves.
     """
     ns = types.SimpleNamespace(
-        color_pair=lambda n: 0,
+        color_pair=lambda n: n << 8,
+        pair_number=lambda a: (a >> 8) & 0xff,
+        A_COLOR=0xff00,
         A_BOLD=0, A_REVERSE=0, A_UNDERLINE=0, A_DIM=0, A_NORMAL=0,
-        error=Exception,
+        # Narrow on purpose. It used to be `Exception`, so the `except
+        # curses.error` guards around every draw swallowed real bugs —
+        # an AttributeError inside an attribute helper made the whole
+        # statistics panel disappear and no test said a word.
+        error=type("error", (Exception,), {}),
         ALL_MOUSE_EVENTS=0, REPORT_MOUSE_POSITION=0,
         KEY_UP=259, KEY_DOWN=258, KEY_PPAGE=339, KEY_NPAGE=338,
         KEY_HOME=262, KEY_END=360, KEY_ENTER=343, KEY_BACKSPACE=263,
@@ -49,6 +55,13 @@ def _curses_stub():
         BUTTON1_PRESSED=4, BUTTON4_PRESSED=65536, BUTTON5_PRESSED=2097152,
         COLOR_BLACK=0, COLOR_RED=1, COLOR_GREEN=2, COLOR_YELLOW=3,
         COLOR_BLUE=4, COLOR_MAGENTA=5, COLOR_CYAN=6, COLOR_WHITE=7,
+        # draw() calls these; without them a test that drives the real draw()
+        # dies in the stub rather than telling you anything about the code.
+        curs_set=lambda n: 0,
+        napms=lambda ms: None,
+        beep=lambda: None,
+        flash=lambda: None,
+        doupdate=lambda: None,
     )
     return ns
 
