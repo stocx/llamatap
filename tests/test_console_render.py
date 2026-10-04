@@ -1641,3 +1641,45 @@ class OneColourPerParty(TapTest):
         for col in ("\033[32m", "\033[36m", "\033[37m", "\033[33m"):
             with self.subTest(col=col):
                 self.assertIn(col, self.C.PANEL_BAR)
+
+
+class CopyCarriesItsProvenance(PartyFilter):
+    """A copied buffer has to say what it is.
+
+    Moving the party row into pinned chrome dropped it from the copy, so a
+    pasted buffer no longer named the harness, the server build or the model
+    — and `/copy` still claimed every exchange while the filter was hiding
+    most of them.
+    """
+
+    def test_the_copy_names_the_participants(self):
+        text = self.console().buffer_text()
+        self.assertIn("in this thread", text,
+                      "a pasted buffer no longer says who produced it")
+        for party, label, _x0, _x1 in self.console().chips:
+            with self.subTest(party=party):
+                self.assertIn(label, text, f"{party} is missing from the copy")
+
+    def test_a_filtered_copy_says_it_was_filtered(self):
+        """A filtered buffer that looks complete is worse than no buffer."""
+        c = self.console(show=["you"])
+        text = c.buffer_text()
+        self.assertIn("hidden by the filter", text,
+                      "a filtered copy claims to be the whole thread")
+        harness = next(l for p, l, _a, _b in c.chips if p == "harness")
+        self.assertIn(f"({harness})", text,
+                      "a hidden party is not marked as hidden")
+
+    def test_an_unfiltered_copy_says_nothing_about_filtering(self):
+        self.assertNotIn("hidden by the filter",
+                         self.console().buffer_text(),
+                         "an unfiltered copy warns about a filter anyway")
+
+    def test_the_copy_still_excludes_hidden_parties(self):
+        """The header names them; the body must not contain them."""
+        body = self.console(show=["you"]).buffer_text().split("\n", 2)[-1]
+        self.assertNotIn("reply 0", body, "a hidden party is in the copy")
+
+    def test_the_header_is_still_absent_from_the_transcript(self):
+        """It belongs to the copy and the pinned row, not to self.lines."""
+        self.assertNotIn("in this thread", self.text_of(self.console()))

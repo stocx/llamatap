@@ -2179,6 +2179,27 @@ class Console:
             self.note(f"exchange #{n} is not in the current view — "
                       f"/repeats to show re-sent messages")
 
+    def header_line(self):
+        """The participants, and which ones the filter is showing.
+
+        The party row is pinned chrome now, not part of the transcript, so it
+        stopped appearing in a copy — a pasted buffer no longer said which
+        harness, which server build or which model produced it. That is most
+        of what makes a buffer worth keeping when comparing harnesses later.
+        """
+        chips = getattr(self, "chips", None)
+        if not chips:
+            return ""
+        show = getattr(self, "show", None) or set(PARTIES)
+        names = [label if party in show else f"({label})"
+                 for party, label, _x0, _x1 in chips]
+        line = "in this thread:  " + "   ".join(names)
+        if any(party not in show for party, _l, _a, _b in chips):
+            # Say it in the copy itself. A filtered buffer that looks
+            # complete is worse than no buffer.
+            line += "\n(parenthesised parties were hidden by the filter)"
+        return line + "\n"
+
     def buffer_text(self, raw=None):
         """Exactly what is on screen, as plain text.
 
@@ -2197,16 +2218,26 @@ class Console:
             out = "\n".join("".join(c for _, c, _ in spans) for spans in self.lines)
             self.opts["rawjson"] = keep
             self.rebuild()
-            return out
-        return "\n".join("".join(c for _, c, _ in spans) for spans in self.lines)
+            return self.header_line() + out
+        return self.header_line() + "\n".join(
+            "".join(c for _, c, _ in spans) for spans in self.lines)
 
     def cmd_copy(self, args):
         raw = bool(args) and args[0].lower() in ("raw", "--raw")
         text = self.buffer_text(raw=True if raw else None)
         tool = clipboard(text)
         if tool:
-            self.note(f"copied {len(text):,} chars "
-                      f"({len(self.recs)} exchanges{', raw' if raw else ''}) via {tool}")
+            # What was COPIED, not how many records exist. With three parties
+            # hidden it still claimed every exchange while copying a
+            # fraction of them — a confirmation that overstates its own
+            # result is worse than none.
+            show = getattr(self, "show", None) or set(PARTIES)
+            scope = ("" if set(show) == set(PARTIES)
+                     else " · " + ", ".join(p for p in PARTIES if p in show)
+                          + " only")
+            self.note(f"copied {len(text):,} chars, "
+                      f"{text.count(chr(10)) + 1:,} lines"
+                      f"{', raw' if raw else ''}{scope} via {tool}")
         else:
             self.note("no clipboard tool found (wl-copy / xclip / xsel) — try /save")
 
