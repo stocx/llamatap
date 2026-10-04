@@ -1869,7 +1869,7 @@ class ToolCallsAreBlocks(TapTest):
     def body(self, c):
         """Rows after the tool-call header, up to the blank that ends it."""
         rows = self.rows(c)
-        i = next(i for i, l in enumerate(rows) if "write()" in l)
+        i = next(i for i, l in enumerate(rows) if "tool call [" in l)
         out = []
         for l in rows[i + 1:]:
             if not l.strip():
@@ -2085,3 +2085,161 @@ class TheServerSpeaksWhenItFails(TapTest):
                         "the error has no speaker row")
         self.assertTrue(any(C.BAR in l and "503" in l for l in rows),
                         "the error text is not in a block")
+
+
+def a_record_with_tools(i=0, n=3):
+    """A request that offers tools, so the `+ N tools` container exists.
+
+    `a_record` offers none, which is why the first version of the expand-all
+    test asserted against a fixture that had nothing to expand.
+    """
+    rec = a_record(i)
+    rec["req"]["tools"] = [
+        {"type": "function",
+         "function": {"name": f"tool{k}",
+                      "description": f"does thing {k}",
+                      "parameters": {"type": "object",
+                                     "properties": {"a": {"type": "string"}}}}}
+        for k in range(n)]
+    return rec
+
+
+class ExpandAllReachesEverything(TapTest):
+    """"Expand all" opened the children of a node it left shut.
+
+    `expand_menu()` collected the system prompt, the content markers and each
+    individual tool — but never the `+ N tools` CONTAINER those tools live
+    inside, nor the system prompt's sections. So the tool list stayed
+    invisible no matter how many times the key was pressed.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def console(self):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record_with_tools(0)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.msg = ""; c.msg_until = 0; c.tick = 0
+        c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        return c
+
+    def kinds(self, c):
+        return {nid[1] for (_l, _a, _b, nid) in c.hotspots}
+
+    def test_the_tools_container_is_opened(self):
+        c = self.console()
+        self.assertIn("tools", self.kinds(c), "the fixture has no tools node")
+        c.toggle_expand_all(); c.rebuild()
+        opened = {nid[1] for nid in c.open}
+        self.assertIn("tools", opened,
+                      "expand-all left the tools container shut")
+
+    def test_the_tool_list_actually_appears(self):
+        """The observable consequence, not just the flag."""
+        c = self.console()
+        before = len(c.lines)
+        c.toggle_expand_all(); c.rebuild()
+        self.assertGreater(len(c.lines), before,
+                           "expand-all revealed nothing")
+        self.assertIn("tool", self.kinds(c),
+                      "individual tools never became visible")
+
+    def test_nested_nodes_revealed_by_opening_a_parent_are_opened_too(self):
+        """A container reveals nodes that did not exist a moment before, so
+        one pass is not enough."""
+        c = self.console()
+        c.toggle_expand_all(); c.rebuild()
+        here = [nid for (_l, _a, _b, nid) in c.hotspots if nid[0] == 0]
+        shut = [nid for nid in here if nid not in c.open]
+        self.assertEqual(shut, [], f"{len(shut)} nodes left shut: {shut[:3]}")
+
+    def test_it_collapses_back(self):
+        c = self.console()
+        shut = len(c.lines)
+        c.toggle_expand_all(); c.rebuild()
+        self.assertGreater(len(c.lines), shut)
+        c.toggle_expand_all(); c.rebuild()
+        self.assertEqual(len(c.lines), shut, "collapse did not undo expand")
+
+    def test_it_terminates_on_a_pathological_tree(self):
+        """The loop is bounded: a node generator that never settles must not
+        spin the console."""
+        c = self.console()
+        n = [0]
+
+        def forever(*a, **k):
+            n[0] += 1
+            c.hotspots.append((0, 0, 1, (0, "fake", f"k{n[0]}")))
+        c.rebuild = forever
+        c.toggle_expand_all()          # must return, not hang
+        self.assertLess(n[0], 20, "expand-all did not terminate")
+
+
+class RowsNameTheAction(TapTest):
+    """Every party row says what the party is doing — `→ thinking`,
+    `→ tool result`, `→ error`. A setup block said only "opencode", which was
+    indistinguishable from opencode speaking, and a tool call said `write()`,
+    which looked like a different sort of thing entirely."""
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def rows(self, recs):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = recs
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.msg = ""; c.msg_until = 0; c.tick = 0
+        c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        return ["".join(ch for _, ch, _ in s).rstrip() for s in c.lines]
+
+    def test_the_setup_block_says_request(self):
+        rows = self.rows([a_record(0)])
+        self.assertTrue(any("→ request" in l for l in rows),
+                        "the setup block does not name what it is")
+
+    def test_a_tool_call_names_the_kind_then_the_tool(self):
+        rows = self.rows([a_tool_call(0)])
+        row = next((l for l in rows if "tool call" in l), "")
+        self.assertIn("tool call [write]", row, f"got: {row!r}")
+        self.assertNotIn("write()", row, "the old form is still used")
+
+    def test_every_arrow_row_uses_the_same_shape(self):
+        """`name → phrase`, so the party is always first and the action
+        always follows one arrow."""
+        rows = self.rows([a_record(0), a_tool_call(1), a_failed_record(2)])
+        arrows = [l.strip() for l in rows if "→" in l]
+        self.assertTrue(arrows, "no arrow rows at all")
+        for row in arrows:
+            self.assertEqual(row.count("→"), 1,
+                             f"more than one arrow in a row: {row!r}")

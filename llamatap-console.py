@@ -981,7 +981,12 @@ class Console:
                 _c, icon = CAT.classify_tool(m.get("tool"))
                 # The MODEL asks for a tool call, so it is the model's
                 # colour, for the same reason the result is the harness's.
-                who, col = f"{model} → {m.get('tool')}()", "\033[33m"
+                # The arrow phrase names the KIND and the bracket carries the
+                # detail, so `→ tool call [write]` lines up with `→ tool
+                # result` instead of `write()` looking like a different sort
+                # of thing entirely.
+                who = f"{model} → tool call [{m.get('tool')}]"
+                col = "\033[33m"
             elif kind == "background":
                 who = m.get("name")
             elif kind == "error":
@@ -993,9 +998,14 @@ class Console:
             elif kind == "cut off":
                 icon, who, col = "", "no reply", "\033[31m"
             elif kind == "setup":
-                # No narration. What this request contains is visible in the
-                # tree underneath it; describing it in prose as well is noise.
-                who = m.get("name")
+                # Name the ACTION, like every other party row does: `→
+                # thinking`, `→ tool result`, `→ error`. A bare "opencode"
+                # here was indistinguishable from opencode saying something,
+                # which is exactly what the next block often is.
+                # "→ request" rather than "→ system prompt": the block holds
+                # the tool definitions too, and frequently they are the larger
+                # half of it.
+                who = f"{m.get('name')} → request"
 
 
             if m.get("repeat"):
@@ -2004,6 +2014,46 @@ class Console:
         self.touched.add(nid)
         self.rebuild()
 
+    def toggle_expand_all(self):
+        """Expand or collapse everything in the exchange you are looking at.
+
+        Driven by the nodes actually on screen, not by a hand-built list.
+        `expand_menu()` collected the system prompt, the content markers and
+        each individual tool — but never the `+ N tools` CONTAINER those tools
+        live inside, nor the system prompt's sections. So "expand all" opened
+        the children of a node it left shut, and the tool list stayed
+        invisible no matter how many times you pressed the key.
+
+        Opening a container reveals nodes that did not exist a moment ago, so
+        this repeats until nothing new appears rather than assuming one pass
+        is enough. Bounded, because a bug in node generation must not spin.
+        """
+        rec = self.rec_at(self.top) or (self.recs[-1] if self.recs else None)
+        if rec is None:
+            return "nothing to expand"
+        ri = self.recs.index(rec)
+        here = [nid for (_l, _a, _b, nid) in self.hotspots if nid[0] == ri]
+        if any(nid in self.open for nid in here):
+            for nid in list(self.open):
+                if nid[0] == ri:
+                    self.open.discard(nid)
+                    self.touched.add(nid)
+            return "collapsed this exchange"
+        for _ in range(8):
+            grew = False
+            for (_l, _a, _b, nid) in list(self.hotspots):
+                if nid[0] == ri and nid not in self.open:
+                    self.open.add(nid)
+                    self.touched.add(nid)
+                    grew = True
+            if not grew:
+                break
+            self.rebuild()
+        return "expanded this exchange"
+
+    def toggle_exchange(self):
+        return self.toggle_expand_all()
+
     def expand_menu(self):
         """Keyboard route: everything expandable in the exchange you are
         LOOKING at, not the newest one — scrolling back to an exchange and
@@ -2540,15 +2590,7 @@ class Console:
                     # one expanding the current exchange and the other
                     # collapsing the whole buffer, were neither symmetrical
                     # nor memorable — you could not undo `o` with `o`.
-                    self.expand_menu()
-                    if any(nid in self.open for nid in self.menu):
-                        for nid in self.menu:
-                            self.open.discard(nid)
-                        self.note("collapsed this exchange")
-                    else:
-                        for nid in self.menu:
-                            self.open.add(nid)
-                        self.note("expanded this exchange")
+                    self.note(self.toggle_exchange())
                     self.rebuild()
                 elif ch == ord("y"):
                     self.cmd_copy([])
