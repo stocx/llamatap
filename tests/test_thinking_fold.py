@@ -69,7 +69,7 @@ class ThinkingFold(TapTest):
         c.follow = True
         c.top = 0
         c.opts = {"rawjson": False, "preamble": False, "flags": False,
-                  "repeats": False, "fold_thinking": fold, "stats": True}
+                  "repeats": False, "fold_thinking": fold, "stats": "right"}
         c.open = set()
         c.touched = set()
         c.hover = None
@@ -172,7 +172,7 @@ class ThinkingFold(TapTest):
         c.scr = Screen(); c.recs = [rec]; c.name = None; c.extra = []
         c.follow = True; c.top = 0
         c.opts = {"rawjson": False, "preamble": False, "flags": False,
-                  "repeats": False, "fold_thinking": True, "stats": True}
+                  "repeats": False, "fold_thinking": True, "stats": "right"}
         c.open = set(); c.touched = set()
         c.hover = None; c.hotspots = []; c.starts = []
         c.menu = []; c.detail = None; c.node_bodies = {}; c.inflight = []

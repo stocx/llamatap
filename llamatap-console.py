@@ -167,7 +167,7 @@ HELP = [
     "p                open or close the system prompt",
     "f                show or hide the launch settings in Model Details",
     "t                fold the model's thinking to one line, or unfold it",
-    "s                show or hide the statistics rail",
+    "s                statistics: right (slim), bottom (full), off",
     "y                copy the whole scroll buffer to the clipboard",
     "/                command palette, filters as you type",
     "Esc              cancel — it does NOT quit",
@@ -191,7 +191,7 @@ COMMANDS = [
     ("flags",    "",                 "show or hide the launch settings in Model Details"),
     ("repeats",  "[open|close]",     "show re-sent messages as collapsed lines; open/close them all"),
     ("thinking", "[open|close]",     "fold the model's thinking to one line; open/close them all"),
-    ("stats",    "",                 "show or hide the statistics rail on the right"),
+    ("stats",    "[right|bottom|off]", "statistics: slim on the right, full across the bottom, or hidden"),
     ("name",     "<label>",          "override the detected harness name"),
     ("help",     "",                 "list these commands"),
     ("quit",     "",                 "exit llamatap console"),
@@ -992,6 +992,8 @@ class Console:
         console chrome and makes no sense in a pipeable dump.
         """
         full = max(16, W - 2)
+        if self.stats_where() == "bottom":
+            full = max(40, self.scr.getmaxyx()[1] - 2)
         live = self.live_rows(full - 2)
         if not self.recs:
             return live + [("  waiting for the first request…", curses.color_pair(6))]
@@ -1014,14 +1016,22 @@ class Console:
 
         # Column widths. Session Totals carries the context gauge — the
         # number you actually watch — so it is no longer the runt.
-        # One column now, so every panel is laid out at the rail's width.
-        c1 = c2 = c3 = full
+        if self.stats_where() == "bottom":
+            # Three panels side by side. Session Totals carries the context
+            # gauge, so it is not the runt.
+            c1 = max(30, int(full * 0.32))
+            c3 = max(30, int(full * 0.30))
+            c2 = full - c1 - c3 - 2          # two dividers
+        else:
+            # One column, so every panel lays out at the rail's width.
+            c1 = c2 = c3 = full
 
         cmd = getattr(self, "_flags", "") or ""
 
         # Label widths adapt: a fixed 16 cells left only 14 for the value in
         # a narrow terminal, which sliced model names mid-string.
-        L = max(9, min(16, c1 - 10))
+        L = max(9, min(16, c2 - 18, c1 - 14)) if self.stats_where() == "bottom" \
+            else max(9, min(16, c1 - 10))
 
         def kv(label, value, attr=0):
             return [(f"{label:<{L}}", curses.color_pair(6)), (str(value), attr)]
@@ -1104,7 +1114,7 @@ class Console:
             dec_ms += t_.get("predicted_ms") or 0
             pre_tok += t_.get("prompt_n") or 0
             pre_ms += t_.get("prompt_ms") or 0
-        S = max(9, min(17, c3 - 9))      # this panel's labels are the longest
+        S = max(9, min(17, c3 - (13 if self.stats_where() == "bottom" else 9)))
         def kv3(label, value, attr=0):
             return [(f"{label:<{S}}", curses.color_pair(6)), (str(value), attr)]
 
@@ -1136,11 +1146,122 @@ class Console:
                             curses.color_pair(6) | curses.A_BOLD))
         col3.append(kv3("Model Time", f"{total_s:.0f} seconds"))
 
-        # Composed as a narrow vertical rail, not three bordered panels side
-        # by side. The panels are the SAME three lists — col1 identity, col2
-        # this turn, col3 the session — stacked in the same time-scale order,
-        # so no statistic can be lost by restyling. What goes is the border
-        # art and the horizontal space it needed at the bottom of the screen.
+        if self.stats_where() == "bottom":
+            return self._dash_panels(live, col1, col2, col3, cmd,
+                                     full, c1, c2, c3)
+        return self._dash_rail(live, col1, col2, col3, cmd, W)
+
+    #: What the slim right-hand rail carries. The bottom panel carries
+    #: everything; the rail is for the few numbers you watch continuously
+    #: while a turn is running, and a narrow column cannot hold more without
+    #: wrapping every value onto its own line.
+    RAIL_KEEP = ("Context", "Cache Reuse", "Prefill", "Decode", "Requests",
+                 "Tokens Generated", "Decode Average")
+
+    def _dash_panels(self, live, col1, col2, col3, cmd, full, c1, c2, c3):
+        """Three bordered panels across the full width.
+
+        Restored from before the restyle. The bottom of the screen is the one
+        place wide enough to show Model Details, Current Request and Session
+        Totals SIDE BY SIDE, and that grouping — identity, this turn, the
+        whole session — is what makes the numbers scannable at a glance. A
+        narrow rail cannot do it, which is why both placements exist.
+        """
+        def hdr(label, w):
+            """Centred panel title. The three panels are distinguished by TIME
+            SCALE — configuration, this turn, the whole session — so their
+            titles are parallel noun phrases in Title Case."""
+            t = f" {label} "
+            pad = max(0, w - dwidth(t))
+            left = pad // 2
+            return "─" * left + t + "─" * (pad - left)
+
+        rows = list(live)
+        # Not "latest request" — it deliberately skips background calls, so it
+        # is the last turn of YOUR conversation.
+        rows.append((f"╭{hdr('Model Details', c1)}┬{hdr('Current Request', c2)}"
+                     f"┬{hdr('Session Totals', c3)}╮",
+                     curses.A_BOLD | curses.color_pair(6)))
+        def spans_of(cell, width, base=0):
+            """A column cell -> [(text, attr)] padded to exactly `width`."""
+            if cell is None:
+                return [(" " * width, 0)]
+            if isinstance(cell, str):
+                return [(fit(" " + cell, width), base)]
+            out, used = [(" ", 0)], 1
+            for txt, att in cell:
+                room = width - used
+                if room <= 0:
+                    break
+                t = fit(txt, min(room, dwidth(txt)))
+                out.append((t, att))
+                used += dwidth(t)
+            if used < width:
+                out.append((" " * (width - used), 0))
+            return out
+
+        div = [("│", curses.color_pair(6))]
+        body = max(len(col1), len(col2), len(col3))
+        # Hard cap: the conversation is what you came to read. Three columns
+        # pad to the tallest, so without this one long column (the 14-row
+        # settings board) decides how much of the screen is left.
+        H = self.scr.getmaxyx()[0]
+        room = max(4, int(H * 0.40) - 3)       # minus two borders and a hint
+        W = full + 2
+        clipped = body - room if body > room else 0
+        if clipped:
+            body = room
+        for i in range(body):
+            segs = list(div)
+            segs += spans_of(col1[i] if i < len(col1) else None, c1)
+            segs += div
+            segs += spans_of(col2[i] if i < len(col2) else None, c2)
+            segs += div
+            segs += spans_of(col3[i] if i < len(col3) else None, c3)
+            segs += div
+            rows.append((segs, 0))
+        if clipped:
+            note = (f" {clipped} more rows — widen"
+                    + (" or press f to hide settings " if self.opts.get("flags")
+                       else " the window "))
+            pad = max(0, full - dwidth(note))
+            rows.append((f"│{note}{' ' * pad}│", curses.color_pair(3)))
+        if cmd:
+            short = re.sub(r"\S*llama-server\s*|-m \S+\s*|--alias \S+\s*"
+                           r"|--port \S+\s*|--host \S+\s*", "", cmd)
+            # A cached command may describe a previous launch, so date it
+            # rather than presenting it as the running one.
+            age = getattr(self, "_flags_age", None)
+            if getattr(self, "_flags_src", "") == "cached" and age:
+                mins = age / 60
+                stale = (f"  (cached {mins:.0f} min ago)" if mins < 90
+                         else f"  (cached {mins/60:.0f} h ago)")
+            elif getattr(self, "_flags_src", "") == "config":
+                stale = "  (from the config file, not the running process)"
+            else:
+                stale = ""
+            rows.append((f"├{'─' * c1}┴{'─' * c2}┴{'─' * c3}┤", curses.color_pair(6)))
+            bar = [("│", curses.color_pair(6))]
+            rows.append((bar
+                         + [(fit(" $ " + short.strip(),
+                                 max(0, full - dwidth(stale))), 0),
+                            (stale, curses.color_pair(3))]
+                         + bar, 0))
+            rows.append((f"╰{'─' * full}╯", curses.color_pair(6)))
+        else:
+            # Say why it is absent rather than just omitting the row: it needs
+            # the ssh agent to read llama-swap's YAML, and a silent gap looks
+            # like the model was launched with no flags at all.
+            why = getattr(self, "_flags_err", "") or (
+                "reading launch flags…" if not getattr(self, "_flags_started", False)
+                else "launch command unavailable")
+            rows.append((f"├{'─' * c1}┴{'─' * c2}┴{'─' * c3}┤", curses.color_pair(6)))
+            rows.append((f"│{fit(' $ ' + why, full)}│", curses.color_pair(3)))
+            rows.append((f"╰{'─' * full}╯", curses.color_pair(6)))
+        return rows
+
+    def _dash_rail(self, live, col1, col2, col3, cmd, W):
+        """A narrow vertical rail: the same cells, filtered and stacked."""
         def heading(text):
             return ([(text, curses.A_BOLD | curses.color_pair(6))], 0)
 
@@ -1152,7 +1273,12 @@ class Console:
             if rows and rows[-1] != ("", 0):
                 rows.append(("", 0))
             rows.append(heading(title))
+            keeping = False
             for cell in col:
+                if isinstance(cell, list) and cell and cell[0][0].strip():
+                    keeping = cell[0][0].strip() in self.RAIL_KEEP
+                if not keeping:
+                    continue
                 if cell is None:
                     rows.append(("", 0))
                 elif isinstance(cell, str):
@@ -1178,38 +1304,42 @@ class Console:
                     for t, a in rest:
                         for piece in self._wrap(t, max(8, W - 3), ""):
                             rows.append(([("  " + piece, a)], 0))
-        if cmd and self.opts.get("flags"):
-            short = re.sub(r"\S*llama-server\s*|-m \S+\s*|--alias \S+\s*"
-                           r"|--port \S+\s*|--host \S+\s*", "", cmd)
-            rows.append(("", 0))
-            rows.append(heading("Launched with"))
-            for piece in self._wrap(short.strip(), max(10, W - 2), ""):
-                rows.append((piece, curses.color_pair(6)))
 
         return rows
 
     # -------------------------------------------------------------------- layout
-    def rail_w(self):
-        """Columns the stats rail occupies, or 0 when it is hidden.
+    def stats_where(self):
+        """Where the statistics are: "right", "bottom" or "off".
 
-        The dashboard used to sit across the bottom, which cost ten to twenty
-        ROWS of a conversation that is the point of the tool. A rail costs
-        columns instead, of which a wide terminal has plenty — and it is
-        hidden entirely on a narrow one, where there are none to spare.
+        Two placements because they are good at different things. The bottom
+        spans the full width, so it can hold the three panels side by side —
+        Model Details / Current Request / Session Totals — which is the
+        grouping that makes the numbers scannable. A right rail cannot do
+        columns, so it carries only the few you watch continuously, and costs
+        screen COLUMNS rather than the ten to twenty rows the bottom panel
+        takes out of the conversation.
         """
-        if not self.opts.get("stats", True):
+        w = self.opts.get("stats", "right")
+        if w == "right" and self.scr.getmaxyx()[1] < 80:
+            return "off"      # no columns to spare on a narrow terminal
+        return w
+
+    def rail_w(self):
+        """Columns the right-hand rail occupies, or 0 when it is elsewhere."""
+        if self.stats_where() != "right":
             return 0
-        cols = self.scr.getmaxyx()[1]
-        if cols < 80:
-            return 0
-        return max(24, min(34, cols // 4))
+        return max(24, min(34, self.scr.getmaxyx()[1] // 4))
 
     def dash_h(self):
         return len(self.dash(self.scr.getmaxyx()[1]))
 
     def view_h(self):
-        # conversation + status + command line. The stats no longer take rows.
-        return max(1, self.scr.getmaxyx()[0] - 2)
+        # conversation + status + command line, and the dashboard too when it
+        # is at the bottom.
+        h = self.scr.getmaxyx()[0] - 2
+        if self.stats_where() == "bottom":
+            h -= self.dash_h() + 1        # +1 for the separator rule
+        return max(1, h)
 
     def to_bottom(self):
         """Prefer the START of the last exchange over the absolute bottom.
@@ -1317,21 +1447,30 @@ class Console:
         except curses.error:
             pass
 
-        # The rail, down the right-hand side rather than across the bottom.
+        where = self.stats_where()
         rw = self.rail_w()
-        if rw:
-            x0 = W - rw
+        if where == "right" and rw:
+            # A divider down the full height, so the rail reads as a column
+            # rather than as text that drifted to the right.
             for y in range(0, H - 2):
                 try:
-                    scr.addnstr(y, x0 - 1, "│", 1, curses.color_pair(6))
+                    scr.addnstr(y, W - rw - 1, "│", 1, curses.color_pair(6))
                 except curses.error:
                     pass
-        for r, (txt, attr) in enumerate(self.dash(rw) if rw else []):
-            y = r
+        if where == "bottom":
+            # A rule between the conversation and the panels, as before.
+            try:
+                scr.addnstr(vh, 0, "─" * (W - 1), W - 1, curses.color_pair(6))
+            except curses.error:
+                pass
+        panel = (self.dash(rw) if where == "right" and rw
+                 else self.dash(W) if where == "bottom" else [])
+        for r, (txt, attr) in enumerate(panel):
+            y = r if where == "right" else vh + 1 + r
             if y >= H - 2:
                 break
             if isinstance(txt, list):
-                x = W - rw + 1
+                x = (W - rw + 1) if where == "right" else 1
                 for seg, a in txt:
                     if x >= W - 1:
                         break
@@ -1342,7 +1481,10 @@ class Console:
                     x += dwidth(seg)
             else:
                 try:
-                    scr.addnstr(y, W - rw + 1, txt, rw - 2, attr)
+                    if where == "right":
+                        scr.addnstr(y, W - rw + 1, txt, rw - 2, attr)
+                    else:
+                        scr.addnstr(y, 1, txt, W - 2, attr)
                 except curses.error:
                     pass
 
@@ -1507,10 +1649,18 @@ class Console:
                     self.open = {n for n in self.open if n[1] != "repeat"}
                 self.rebuild()
         elif c in ("stats", "panel", "rail"):
-            self.opts["stats"] = not self.opts.get("stats", True)
+            arg = (args[0].lower() if args else "")
+            order = ("right", "bottom", "off")
+            if arg in order:
+                self.opts["stats"] = arg
+            else:
+                cur = self.opts.get("stats", "right")
+                self.opts["stats"] = order[(order.index(cur) + 1) % len(order)
+                                           if cur in order else 0]
             self.rebuild()
-            self.note("stats rail hidden" if not self.opts["stats"]
-                      else "stats rail shown")
+            self.note({"right": "stats on the right — the few you watch live",
+                       "bottom": "stats across the bottom — everything",
+                       "off": "stats hidden"}[self.opts["stats"]])
         elif c in ("thinking", "think"):
             arg = (args[0].lower() if args else "")
             # These set the DEFAULT for every thought, so they also clear any

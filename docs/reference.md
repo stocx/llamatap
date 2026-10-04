@@ -137,6 +137,23 @@ about the model, about this turn, or about the whole session?" and the column
 answers it.
 
 ```
+**Two placements, because they are good at different things.** `s` cycles
+right → bottom → off.
+
+**Right** is slim: the few numbers you watch while a turn runs. It costs
+screen columns, of which a wide terminal has plenty, and it is hidden
+automatically below 80 columns. It carries Context, Cache Reuse, Prefill,
+Decode, Requests, Tokens Generated and Decode Average.
+
+**Bottom** is everything, in three panels side by side — Model Details /
+Current Request / Session Totals — which is the grouping that makes the
+numbers scannable. It is the only placement wide enough for columns, and the
+only one that shows the settings board (`/flags`) and the launch command. It
+costs conversation rows, and is capped at 40% of the screen height; if it
+clips, it says how many rows it hid.
+
+The right-hand rail:
+
 Session
 Context
   15,427 of 65,536 tokens
@@ -207,7 +224,7 @@ row and always shown; the two no longer share a toggle.
     p                open or close the system prompt
     f                show or hide the launch settings in Model Details
     t                fold the model's thinking to one line, or unfold it
-    s                show or hide the statistics rail
+    s                statistics: right (slim), bottom (full), off
     y                copy the whole scroll buffer to the clipboard
     /                command palette, filters as you type
     Esc              cancel — it does NOT quit
@@ -241,7 +258,7 @@ Tab completes, Enter runs, Esc cancels.
 | `/flags` | show or hide the launch settings in Model Details |
 | `/repeats [open\|close]` | show re-sent messages as collapsed lines; open or close them all |
 | `/thinking [open\|close]` | fold the model's thinking to one line; open or close them all |
-| `/stats` | show or hide the statistics rail on the right |
+| `/stats [right\|bottom\|off]` | statistics: slim on the right, full across the bottom, or hidden |
 | `/name <label>` | override the detected harness name |
 | `/help` | list these commands and the keys |
 | `/quit` | exit |

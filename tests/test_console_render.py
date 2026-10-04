@@ -169,7 +169,7 @@ class StatsRail(TapTest):
         super().setUp()
         self.C = load("console")
 
-    def console(self, rows, cols, flags=False, stats=True):
+    def console(self, rows, cols, flags=False, stats="right"):
         C = self.C
         recs = [a_record(i) for i in range(6)]
 
@@ -201,21 +201,56 @@ class StatsRail(TapTest):
         return "\n".join(out)
 
     def test_every_dashboard_statistic_survived(self):
-        """The whole point: a restyle may move a number, never lose it."""
-        text = self.rail_text(self.console(40, 160))
+        """The whole point: a restyle may move a number, never lose it.
+
+        Asserted against the BOTTOM placement, which is the full view. The
+        right-hand rail is a deliberate subset — see RAIL_KEEP — because a
+        narrow column cannot hold everything without wrapping every value onto
+        its own line.
+        """
+        c = self.console(40, 160, stats="bottom")
+        text = self.rail_text(c, width=158)
         missing = [l for l in DASHBOARD_LABELS if l not in text]
         self.assertEqual(missing, [], f"statistics lost in the restyle: {missing}")
 
     def test_the_settings_board_survived(self):
-        text = self.rail_text(self.console(40, 160, flags=True))
+        # A tall screen on purpose: the bottom panel is capped at 40% of the
+        # height so it cannot own the display, and on a 40-row terminal the
+        # 14-row settings board is clipped BY DESIGN. That cap is tested
+        # separately below; this test is about nothing being lost.
+        c = self.console(70, 160, flags=True, stats="bottom")
+        text = self.rail_text(c, width=158)
         missing = [l for l in SETTINGS_LABELS if l not in text]
         self.assertEqual(missing, [], f"settings lost in the restyle: {missing}")
+
+    def test_the_bottom_panel_is_capped_and_says_so(self):
+        """It took 23 of 30 rows once. When it clips, it must announce it
+        rather than silently hiding settings."""
+        c = self.console(30, 160, flags=True, stats="bottom")
+        rows = c.dash(158)
+        self.assertLessEqual(len(rows), 15, "the bottom panel is unbounded")
+        text = "\n".join("".join(x for x, _ in r) if isinstance(r, list) else r
+                         for r, _ in rows)
+        self.assertIn("more rows", text,
+                      "rows were clipped without saying so")
+
+    def test_the_rail_carries_its_documented_subset(self):
+        text = self.rail_text(self.console(40, 160, stats="right"))
+        missing = [l for l in self.C.Console.RAIL_KEEP if l not in text]
+        self.assertEqual(missing, [], f"the rail dropped one of its own: {missing}")
+
+    def test_the_rail_is_smaller_than_the_bottom_panel(self):
+        """If the slim view is not slimmer, it has no reason to exist."""
+        rail = self.rail_text(self.console(40, 160, stats="right"))
+        full = self.rail_text(self.console(40, 160, stats="bottom"), width=158)
+        self.assertLess(len(rail.split("\n")), len(full.split("\n")) + 12)
+        self.assertNotIn("Memory Map", rail)
 
     def test_no_rail_row_exceeds_the_rail_width(self):
         for cols in (80, 100, 140, 190):
             for flags in (False, True):
                 with self.subTest(cols=cols, flags=flags):
-                    c = self.console(40, cols, flags)
+                    c = self.console(40, cols, flags, stats="right")
                     w = c.rail_w()
                     for spans, _ in c.dash(w):
                         t = ("".join(x for x, _ in spans)
@@ -227,7 +262,7 @@ class StatsRail(TapTest):
     def test_the_conversation_does_not_run_under_the_rail(self):
         for cols in (80, 100, 140, 190):
             with self.subTest(cols=cols):
-                c = self.console(40, cols)
+                c = self.console(40, cols, stats="right")
                 limit = cols - c.rail_w() - 1
                 for spans in c.lines:
                     t = "".join(ch for _, ch, _ in spans)
@@ -235,8 +270,8 @@ class StatsRail(TapTest):
                                          f"conversation runs under the rail: {t!r}")
 
     def test_hiding_the_rail_gives_the_width_back(self):
-        wide = self.console(40, 140, stats=False)
-        narrow = self.console(40, 140, stats=True)
+        wide = self.console(40, 140, stats="off")
+        narrow = self.console(40, 140, stats="right")
         self.assertEqual(wide.rail_w(), 0)
         self.assertGreater(narrow.rail_w(), 0)
         self.assertGreater(wide._conv_w, narrow._conv_w,
@@ -246,20 +281,39 @@ class StatsRail(TapTest):
         self.assertEqual(self.console(40, 70).rail_w(), 0,
                          "the rail should not eat a narrow terminal")
 
-    def test_the_stats_command_toggles(self):
+    def test_the_stats_command_cycles_the_placements(self):
         c = self.console(40, 140)
-        self.assertGreater(c.rail_w(), 0)
+        self.assertEqual(c.stats_where(), "right")
         c.run_cmd("stats")
-        self.assertEqual(c.rail_w(), 0)
+        self.assertEqual(c.stats_where(), "bottom")
         c.run_cmd("stats")
-        self.assertGreater(c.rail_w(), 0)
+        self.assertEqual(c.stats_where(), "off")
+        c.run_cmd("stats")
+        self.assertEqual(c.stats_where(), "right")
 
-    def test_the_stats_never_take_rows_from_the_conversation(self):
+    def test_a_placement_can_be_named(self):
+        c = self.console(40, 140)
+        for where in ("bottom", "off", "right"):
+            with self.subTest(where=where):
+                c.run_cmd(f"stats {where}")
+                self.assertEqual(c.stats_where(), where)
+
+    def test_the_bottom_panel_takes_rows_and_the_rail_does_not(self):
+        """The two placements trade rows against columns; that is the choice."""
+        rail = self.console(40, 140, stats="right")
+        bottom = self.console(40, 140, stats="bottom")
+        self.assertEqual(rail.view_h(), 38)
+        self.assertLess(bottom.view_h(), rail.view_h(),
+                        "the bottom panel should cost conversation rows")
+        self.assertEqual(bottom.rail_w(), 0,
+                         "the rail should not also be showing")
+
+    def test_the_rail_never_takes_rows_from_the_conversation(self):
         """The complaint that started this: the panel took the bottom of the
-        screen. A rail costs columns, which a wide terminal has."""
+        screen. On the right it costs columns, which a wide terminal has."""
         for rows in (24, 30, 40, 60):
             with self.subTest(rows=rows):
-                c = self.console(rows, 140)
+                c = self.console(rows, 140, stats="right")
                 self.assertEqual(c.view_h(), rows - 2)
 
 
@@ -489,7 +543,7 @@ class NoDecoration(TapTest):
         c.scr = Screen(); c.recs = [a_record(i) for i in range(4)]
         c.name = None; c.extra = []; c.follow = False; c.top = 0
         c.opts = {"rawjson": False, "preamble": False, "flags": False,
-                  "repeats": False, "fold_thinking": fold, "stats": True}
+                  "repeats": False, "fold_thinking": fold, "stats": "right"}
         c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
         c.menu = []; c.detail = None; c.node_bodies = {}; c.inflight = []
         c.msg = ""; c.msg_until = 0; c.tick = 0
@@ -544,7 +598,7 @@ class NoDecoration(TapTest):
         c.scr = Screen(); c.recs = [rec]; c.name = None; c.extra = []
         c.follow = False; c.top = 0
         c.opts = {"rawjson": False, "preamble": False, "flags": False,
-                  "repeats": False, "fold_thinking": False, "stats": True}
+                  "repeats": False, "fold_thinking": False, "stats": "right"}
         c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
         c.menu = []; c.detail = None; c.node_bodies = {}; c.inflight = []
         c.msg = ""; c.msg_until = 0; c.tick = 0
