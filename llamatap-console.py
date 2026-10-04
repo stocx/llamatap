@@ -624,32 +624,45 @@ class Console:
         width = max(8, width)
         out = []
         for para in (text or "").split("\n"):
-            if not para:
+            if not para.strip():
                 out.append(indent)
                 continue
+            # Leading whitespace is CONTENT. `para.split(" ")` turns it into
+            # empty strings that the loop below skips, so every line came out
+            # flush left: the model's indented Python was rendered as code it
+            # had not written, and a nested bullet list collapsed to one
+            # level. For a tool whose job is showing what crossed the wire,
+            # that is the worst kind of defect — it misreports the payload.
+            lead = para[:len(para) - len(para.lstrip())].replace("\t", "    ")
+            para = para.lstrip()
+            ind = indent + lead
+            # The indent comes out of the line's budget, or a deeply nested
+            # line wraps past the right edge. Floored, so pathological
+            # nesting still renders something.
+            width_ = max(8, width - dwidth(lead))
             cur = ""
             for word in para.split(" "):
                 # A word wider than the whole line can never fit beside
                 # anything; break it into width-sized pieces.
-                while dwidth(word) > width:
+                while dwidth(word) > width_:
                     if cur:
-                        out.append(indent + cur)
+                        out.append(ind + cur)
                         cur = ""
-                    head, word = take(word, width)
+                    head, word = take(word, width_)
                     if not head:
                         break
-                    out.append(indent + head)
+                    out.append(ind + head)
                 if not word:
                     continue
-                if cur and dwidth(cur) + 1 + dwidth(word) > width:
-                    out.append(indent + cur)
+                if cur and dwidth(cur) + 1 + dwidth(word) > width_:
+                    out.append(ind + cur)
                     cur = word
                 elif not cur:
                     cur = word
                 else:
                     cur = cur + " " + word
-            if cur or not out or out[-1] != indent:
-                out.append(indent + cur)
+            if cur or not out or out[-1] != ind:
+                out.append(ind + cur)
         return out
 
     def block(self, body, col, indent, width, text_col=None, foot=None):
@@ -894,7 +907,12 @@ class Console:
             "harness": (P["harness"].rstrip(), "\033[36m"),  # cyan
             "server":  (P["server"].rstrip(),  "\033[37m"),  # white
             "model":   (P["model"],            "\033[33m"),  # yellow
-            "tool":    ("",                    "\033[35m"),  # magenta
+            # A tool result comes back from the HARNESS, so it is the
+            # harness's colour. It used to be magenta, which gave opencode
+            # two colours on one screen for no reason the reader could see —
+            # and contradicted the filter, which already treats a tool result
+            # as the harness.
+            "tool":    ("",                    "\033[36m"),  # harness cyan
         }
 
         # Which exchange is background, and what harness each belongs to.
@@ -961,7 +979,9 @@ class Console:
                 col = "\033[33m"
             elif kind == "tool call":
                 _c, icon = CAT.classify_tool(m.get("tool"))
-                who, col = f"{model} → {m.get('tool')}()", "\033[35m"
+                # The MODEL asks for a tool call, so it is the model's
+                # colour, for the same reason the result is the harness's.
+                who, col = f"{model} → {m.get('tool')}()", "\033[33m"
             elif kind == "background":
                 who = m.get("name")
             elif kind == "cut off":
@@ -1028,6 +1048,10 @@ class Console:
                                "thinking", key, "Thought", "", 1, True,
                                base=2 + pad)
                 self._bar = ""
+                # The blank line between blocks is emitted at the END of the
+                # loop body, which this branch skips — so a thought was the
+                # one block with no gap after it.
+                self.emit("")
                 continue
             n = m.get("chars", 0)
             stat = f"{n:,} chars · ~{n//4:,} tokens"
@@ -1142,11 +1166,7 @@ class Console:
                     self.emit("")
                     continue
                 avail = max(8, min(W - body_col - 2, W - body_col - 6))
-                if kind == "thinking":
-                    # lighter text: thinking is not speech
-                    self.block(body, "\033[33m", body_col, avail,
-                               text_col=C_BODY, foot=clock(m.get("t", "")))
-                elif kind == "cut off":
+                if kind == "cut off":
                     # Worth recording, not worth alarming about: the harness
                     # abandoned its own background request. One dim line.
                     for ln in self._wrap(body, avail, " " * body_col):

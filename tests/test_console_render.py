@@ -1533,3 +1533,111 @@ class StreamScrolls(TapTest):
                         "the forced body never reached the screen")
         bare = [l for l in rows if l.strip() == "▌"]
         self.assertEqual(bare, [], f"{len(bare)} bare accent-bar rows")
+
+
+class IndentationIsContent(TapTest):
+    """`_wrap` destroyed every leading space.
+
+    `para.split(" ")` turns leading whitespace into empty strings that the
+    wrap loop skips, so every line came out flush left — the model's indented
+    Python was shown as code it had not written, and nested bullets collapsed
+    to one level. For a tool whose job is showing what crossed the wire, that
+    misreports the payload.
+    """
+
+    CODE = (
+        "def main():\n"
+        '    """Return hello world message"""\n'
+        '    return "Hello, World!"\n'
+        "\n"
+        "if __name__ == \"__main__\":\n"
+        "    print(main())"
+    )
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def wrap(self, text, width=100, indent=""):
+        c = self.C.Console.__new__(self.C.Console)
+        return c._wrap(text, width, indent)
+
+    def test_leading_spaces_survive(self):
+        out = self.wrap(self.CODE)
+        body = [l for l in out if "return" in l][0]
+        self.assertTrue(body.startswith("    "),
+                        f"indentation was stripped: {body!r}")
+
+    def test_every_level_is_preserved_exactly(self):
+        for src in ("    four", "        eight", "  two", "\tone tab"):
+            with self.subTest(src=src):
+                got = self.wrap(src)[0]
+                want = src.replace("\t", "    ")
+                self.assertEqual(got, want, "the indent changed")
+
+    def test_the_indent_is_added_to_the_caller_s_indent(self):
+        out = self.wrap("    nested", indent="> ")
+        self.assertEqual(out[0], ">     nested")
+
+    def test_a_wrapped_line_keeps_the_indent_on_every_row(self):
+        """A hanging indent, not just the first row — otherwise the
+        continuation jumps left and reads as a new statement."""
+        out = self.wrap("    " + "word " * 40, width=30)
+        self.assertGreater(len(out), 1, "the fixture did not wrap")
+        for row in out:
+            self.assertTrue(row.startswith("    "),
+                            f"continuation lost the indent: {row!r}")
+
+    def test_the_indent_comes_out_of_the_width(self):
+        """Otherwise a deeply nested line wraps past the right edge."""
+        width = 40
+        for lead in ("", "    ", "            "):
+            with self.subTest(lead=lead):
+                for row in self.wrap(lead + "word " * 30, width=width):
+                    # Exactly the width. The first version allowed
+                    # `width + len(lead) + 8` of slack, which is more than the
+                    # indent could ever add — so it passed whether or not the
+                    # indent was charged to the budget at all.
+                    self.assertLessEqual(
+                        self.C.dwidth(row), width,
+                        f"row ran past the width: {row!r}")
+
+    def test_blank_lines_are_still_blank(self):
+        out = self.wrap("a\n\nb", indent="| ")
+        self.assertIn("| ", out, "a blank line lost its indent row")
+
+    def test_a_whitespace_only_line_does_not_become_an_indent_row(self):
+        """`   ` is visually blank; emitting it as content made a bare
+        accent-bar row."""
+        out = self.wrap("a\n   \nb")
+        self.assertEqual([l for l in out if l.strip()], ["a", "b"])
+
+
+class OneColourPerParty(TapTest):
+    """opencode rendered in two colours — cyan speaking, magenta for a tool
+    result — which contradicted the filter, where a tool result is already
+    the harness."""
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def test_a_tool_result_is_the_harness_colour(self):
+        src = open(os.path.join(ROOT, "llamatap-console.py")).read()
+        self.assertNotIn('"\\033[35m"),  # magenta', src,
+                         "a party is still rendered in magenta")
+
+    def test_no_party_shares_a_colour_with_another(self):
+        """Distinct parties must stay distinguishable after the merge."""
+        C = self.C
+        colours = {"you": "\033[32m", "harness": "\033[36m",
+                   "server": "\033[37m", "model": "\033[33m"}
+        self.assertEqual(len(set(colours.values())), len(colours),
+                         "two parties now share a colour")
+
+    def test_the_bar_has_a_panel_twin_for_every_party_colour(self):
+        """A colour with no PANEL_BAR entry falls back to plain, so the block
+        loses its accent bar silently."""
+        for col in ("\033[32m", "\033[36m", "\033[37m", "\033[33m"):
+            with self.subTest(col=col):
+                self.assertIn(col, self.C.PANEL_BAR)

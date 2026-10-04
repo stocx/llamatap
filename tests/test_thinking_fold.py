@@ -282,3 +282,40 @@ class ThinkingFold(TapTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThinkingSpacing(ThinkingFold):
+    """A thought is a block like any other and gets the same gap after it.
+
+    The blank line between blocks is emitted at the end of the message loop,
+    which the thinking branch skipped with `continue` — so a thought was the
+    one block that ran straight into whatever spoke next.
+    """
+
+    def rows(self, c):
+        return ["".join(ch for _, ch, _ in spans).rstrip() for spans in c.lines]
+
+    def test_a_blank_line_follows_a_thought(self):
+        for fold in (True, False):
+            with self.subTest(folded=fold):
+                rows = self.rows(self.console(fold=fold))
+                hits = [i for i, l in enumerate(rows) if "Thought" in l]
+                self.assertTrue(hits, "no thinking block rendered")
+                last = hits[-1]
+                tail = next((i for i in range(last, len(rows))
+                             if not rows[i].strip()), None)
+                self.assertIsNotNone(tail, "a thought ends the buffer with no gap")
+                between = [l for l in rows[last + 1:tail] if l.strip()]
+                self.assertTrue(
+                    all("▌" in l for l in between),
+                    f"a non-block row ran straight into the thought: {between[:2]}")
+
+    def test_the_gap_matches_every_other_block(self):
+        """One blank line, not two — a thought must not look specially
+        spaced either."""
+        rows = self.rows(self.console(fold=True))
+        for i, l in enumerate(rows[:-2]):
+            if "Thought" in l:
+                self.assertTrue(
+                    rows[i + 1].strip() == "" or "▌" in rows[i + 1],
+                    f"unexpected row after a thought: {rows[i + 1]!r}")
