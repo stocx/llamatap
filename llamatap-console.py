@@ -1130,39 +1130,58 @@ class Console:
                     # tool results and replies on a narrow terminal — the same
                     # defect emit_node had, in a different place.
                     avail = max(8, min(W - body_col - 2, W - body_col - 6))
-                    if self.opts.get("rawjson"):
-                        # Exactly as it crossed the wire: one escaped JSON
-                        # string, newlines as \n.
-                        for ln in self._wrap(body, avail, " " * body_col):
-                            self.emit(f"{C_BODY}{ln}{C_OFF}")
+                    args = None
+                    if not self.opts.get("rawjson"):
+                        try:
+                            parsed = json.loads(body)
+                            if isinstance(parsed, dict):
+                                args = parsed
+                        except Exception:
+                            pass
+                    if args is None:
+                        # Raw mode, or arguments that are not a JSON object:
+                        # the bytes as they crossed the wire — but through
+                        # block(), so a tool call is a block like everything
+                        # else instead of bare lines on the wallpaper.
+                        self.block(body, col, body_col, avail,
+                                   text_col=C_BODY)
                         self.emit("")
                         continue
-                    try:
-                        args = json.loads(body)
-                        if not isinstance(args, dict):
-                            raise ValueError
-                    except Exception:
-                        for ln in self._wrap(body, avail, " " * body_col):
-                            self.emit(f"{C_BODY}{ln}{C_OFF}")
-                        self.emit("")
-                        continue
-                    # Readable: each argument on its own, and a multi-line
-                    # value printed as the lines it actually is. A file's
-                    # contents are the whole point of a write() call and are
-                    # unreadable as one escaped string.
-                    pad = " " * body_col
-                    for k, v in args.items():
+                    # Deterministic order: single-line arguments first, then
+                    # the multi-line ones, each alphabetical. Iterating the
+                    # model's JSON in insertion order meant write() showed
+                    # `content` before `filePath` in one call and after it in
+                    # the next, so the same tool never looked the same twice.
+                    flat, long_ = [], []
+                    for k in sorted(args):
+                        v = args[k]
                         if isinstance(v, str) and "\n" in v:
-                            self.emit(f"{col}{pad}{k}:{C_OFF}")
-                            for ln in v.split("\n"):
-                                for piece in (self._wrap(ln, avail - 4, "") or [""]):
-                                    self.emit(f"{C_BODY}{pad}  │ {piece}{C_OFF}")
+                            long_.append((k, v))
                         else:
-                            txt = v if isinstance(v, str) else json.dumps(v)
-                            first = True
-                            for piece in self._wrap(f"{k}: {txt}", avail, ""):
-                                self.emit(f"{col if first else C_BODY}{pad}{piece}{C_OFF}")
-                                first = False
+                            flat.append(
+                                (k, v if isinstance(v, str) else json.dumps(v)))
+                    if flat:
+                        self.block("\n".join(f"{k}: {v}" for k, v in flat),
+                                   col, body_col, avail, text_col=C_BODY)
+                    # A multi-line value is the thing that floods the view —
+                    # a 200-line write() had no `+` to collapse it while the
+                    # system prompt, the tools and every thought did. Each one
+                    # is its own node now, open by default so nothing moves
+                    # until you choose to fold it.
+                    self._bar = col
+                    rec_i = m.get("rec", 0)
+                    for k, v in long_:
+                        key = f"{mi}:{k}"
+                        self.node_bodies[("toolarg", key)] = v.split("\n")
+                        nid = (rec_i, "toolarg", key)
+                        if nid not in self.touched:
+                            self.open.add(nid)
+                        self.emit_node(rec_i, self.recs[rec_i], None,
+                                       "toolarg", key, k,
+                                       f"{len(v):,} chars · "
+                                       f"{v.count(chr(10)) + 1:,} lines",
+                                       1, True, base=body_col)
+                    self._bar = ""
                     self.emit("")
                     continue
                 avail = max(8, min(W - body_col - 2, W - body_col - 6))

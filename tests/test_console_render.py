@@ -1808,3 +1808,151 @@ class ExpandToggle(TapTest):
     def test_the_help_no_longer_advertises_two_keys(self):
         for line in self.C.HELP:
             self.assertNotIn("o / O", line, "the help still lists o / O")
+
+
+def a_tool_call(i=0, args=None):
+    """A record whose reply is a tool call, with arguments in a chosen order."""
+    import json as _j
+    args = args if args is not None else {
+        "content": "line one\nline two\nline three", "filePath": "/tmp/x.py"}
+    return {
+        "t": f"2026-10-04T13:0{i}:00", "path": "/v1/chat/completions",
+        "status": 200,
+        "req": {"model": "qwen", "messages": [
+            {"role": "system", "content": "be terse"},
+            {"role": "user", "content": "write it"}]},
+        "resp": _j.dumps({"choices": [{"message": {
+            "content": "", "tool_calls": [{"id": "c1", "type": "function",
+                "function": {"name": "write",
+                             "arguments": _j.dumps(args)}}]},
+            "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20}}),
+        "meta": {"usage": {"prompt_tokens": 10, "completion_tokens": 20},
+                 "elapsed_ms": 500}}
+
+
+class ToolCallsAreBlocks(TapTest):
+    """A tool call was the one message rendered as bare lines: no accent bar,
+    no panel fill, an old `│` gutter for multi-line values, no `+` to collapse
+    a long one, and arguments in whatever order the model's JSON happened to
+    use."""
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def console(self, args=None, rawjson=False):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_tool_call(0, args)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": rawjson, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.msg = ""; c.msg_until = 0; c.tick = 0
+        c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        return c
+
+    def rows(self, c):
+        return ["".join(ch for _, ch, _ in spans).rstrip() for spans in c.lines]
+
+    def body(self, c):
+        """Rows after the tool-call header, up to the blank that ends it."""
+        rows = self.rows(c)
+        i = next(i for i, l in enumerate(rows) if "write()" in l)
+        out = []
+        for l in rows[i + 1:]:
+            if not l.strip():
+                break
+            out.append(l)
+        return out
+
+    def test_every_argument_row_is_behind_the_accent_bar(self):
+        for row in self.body(self.console()):
+            self.assertIn(self.C.BAR, row,
+                          f"argument row is not in a block: {row!r}")
+
+    def test_raw_json_is_also_a_block(self):
+        rows = self.body(self.console(rawjson=True))
+        self.assertTrue(rows, "raw mode rendered nothing")
+        for row in rows:
+            self.assertIn(self.C.BAR, row, f"raw row is not a block: {row!r}")
+
+    def test_arguments_that_are_not_an_object_are_still_a_block(self):
+        """A model can emit a bare string or a list; that path used to fall
+        through to unformatted lines."""
+        for bad in ('"just a string"', "[1, 2, 3]", "not json at all"):
+            with self.subTest(args=bad):
+                import json as _j
+                rec = a_tool_call(0)
+                resp = _j.loads(rec["resp"])
+                resp["choices"][0]["message"]["tool_calls"][0]["function"][
+                    "arguments"] = bad
+                rec["resp"] = _j.dumps(resp)
+                c = self.console()
+                c.recs = [rec]
+                c.rebuild()
+                for row in self.body(c):
+                    self.assertIn(self.C.BAR, row, f"{bad}: {row!r}")
+
+    def test_a_multi_line_argument_is_collapsible(self):
+        c = self.console()
+        nodes = [h for h in c.hotspots if h[3][1] == "toolarg"]
+        self.assertTrue(nodes, "a multi-line argument has no +/- node")
+        before = len(c.lines)
+        c.toggle(nodes[0][3])
+        self.assertLess(len(c.lines), before, "collapsing it changed nothing")
+
+    def test_a_collapsed_argument_still_states_its_size(self):
+        """Folding hides the text, never the cost — the same rule thinking
+        follows."""
+        c = self.console()
+        row = next(l for l in self.rows(c) if "content" in l and "chars" in l)
+        self.assertIn("lines", row, f"no size on the node row: {row!r}")
+
+    def test_a_single_line_argument_is_not_a_node(self):
+        """There is nothing to collapse, and a `+` you must open to read one
+        short path is worse than the path."""
+        c = self.console(args={"command": "ls -la"})
+        self.assertEqual([h for h in c.hotspots if h[3][1] == "toolarg"], [])
+        self.assertTrue(any("command: ls -la" in l for l in self.rows(c)))
+
+    def test_the_order_does_not_depend_on_the_model_s_json(self):
+        """Several of each kind. With one scalar and one multi-line value the
+        flat/long split alone fixes the order, so the first version of this
+        test passed with the sort removed."""
+        forward = {"zeta": "1", "alpha": "2", "mid": "3",
+                   "yankee": "a\nb", "bravo": "c\nd"}
+        a = self.body(self.console(args=forward))
+        b = self.body(self.console(
+            args=dict(reversed(list(forward.items())))))
+        self.assertEqual(a, b, "argument order followed the model's JSON")
+
+    def test_arguments_are_alphabetical_within_their_kind(self):
+        rows = self.body(self.console(args={
+            "zeta": "1", "alpha": "2", "yankee": "a\nb", "bravo": "c\nd"}))
+        order = [k for k in ("alpha", "zeta", "bravo", "yankee")
+                 if any(k in l for l in rows)]
+        self.assertEqual(order, ["alpha", "zeta", "bravo", "yankee"],
+                         f"not sorted within kind: {rows}")
+
+    def test_single_line_arguments_come_first(self):
+        rows = self.body(self.console())
+        flat = next(i for i, l in enumerate(rows) if "filePath" in l)
+        long_ = next(i for i, l in enumerate(rows) if "content" in l)
+        self.assertLess(flat, long_,
+                        "a multi-line argument was printed before a short one")
+
+    def test_the_old_gutter_glyph_is_gone(self):
+        for row in self.body(self.console()):
+            self.assertNotIn("│", row, f"the old gutter is back: {row!r}")
