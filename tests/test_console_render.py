@@ -2223,9 +2223,9 @@ class RowsNameTheAction(TapTest):
         c.rebuild()
         return ["".join(ch for _, ch, _ in s).rstrip() for s in c.lines]
 
-    def test_the_setup_block_says_request(self):
+    def test_the_setup_block_says_setup(self):
         rows = self.rows([a_record(0)])
-        self.assertTrue(any("→ request" in l for l in rows),
+        self.assertTrue(any("→ setup" in l for l in rows),
                         "the setup block does not name what it is")
 
     def test_a_tool_call_names_the_kind_then_the_tool(self):
@@ -2360,3 +2360,158 @@ class UnknownHarness(TapTest):
         msgs = self.T.conversation(recs, None, False)
         bg = [m for m in msgs if m.get("kind") == "setup" and m.get("background")]
         self.assertEqual(bg, [], "a stateless harness was read as side calls")
+
+
+class InFlightHoldsItsPlace(TapTest):
+    """The request half of an exchange appears while it is in flight.
+
+    Only the completed record carries the parsed request — the in-flight entry
+    has its byte count and nothing else — so the system prompt, the harness's
+    message and the tool list could not appear until the model had finished
+    answering. They then arrived ABOVE the reply you had been watching stream,
+    which reads as the thread reordering itself. A spinner placeholder holds
+    the position instead.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def console(self, job=None, recs=1):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(i) for i in range(recs)]
+        c.name = None; c.extra = []; c.follow = True; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = [job] if job else []
+        c.msg = ""; c.msg_until = 0; c.tick = 0; c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        return c
+
+    def rows(self, c):
+        return ["".join(ch for _, ch, _ in s).rstrip() for s in c.lines]
+
+    def live_row(self, c):
+        """The in-flight placeholder, found by its own wording.
+
+        Matching "→ request" alone also matched the COMPLETED setup block,
+        which says the same thing — so two of these tests were reading a
+        finished record and calling it the placeholder.
+        """
+        return next((l for l in self.rows(c) if "bytes ·" in l), None)
+
+    def test_a_prefilling_request_is_visible(self):
+        """Nothing at all used to be drawn until the first token arrived —
+        ten seconds of prefill looked like a frozen console."""
+        c = self.console({"model": "qwen", "req_bytes": 39747,
+                          "state": "prefill"})
+        row = self.live_row(c)
+        self.assertIsNotNone(row, "a request in flight is invisible")
+        self.assertIn("→ sending", row)
+        self.assertIn("39,747", row, "its size is not stated")
+        self.assertIn("prefill", row, "its state is not stated")
+
+    def test_the_request_is_above_the_reply(self):
+        """The whole point: the request came first, so it must look it."""
+        c = self.console({"model": "qwen", "req_bytes": 100,
+                          "state": "decoding", "text": "partial answer"})
+        rows = self.rows(c)
+        req = next(i for i, l in enumerate(rows) if "bytes ·" in l)
+        rep = next(i for i, l in enumerate(rows) if "partial answer" in l)
+        self.assertLess(req, rep, "the reply was drawn above its own request")
+
+    def test_streaming_thinking_is_also_below_the_request(self):
+        c = self.console({"model": "qwen", "req_bytes": 100,
+                          "state": "decoding", "thinking": "weighing it up"})
+        rows = self.rows(c)
+        req = next(i for i, l in enumerate(rows) if "bytes ·" in l)
+        think = next(i for i, l in enumerate(rows) if "weighing it up" in l)
+        self.assertLess(req, think)
+
+    def test_nothing_is_drawn_when_nothing_is_in_flight(self):
+        c = self.console()
+        self.assertIsNone(self.live_row(c),
+                          "a placeholder with no request in flight")
+        self.assertEqual(c._live_lines, 0)
+
+    def test_the_spinner_advances(self):
+        job = {"model": "qwen", "req_bytes": 100, "state": "prefill"}
+        c = self.console(job)
+        first = self.live_row(c)
+        c.tick += 1
+        c.rebuild()
+        self.assertNotEqual(first, self.live_row(c), "the spinner is frozen")
+
+    def test_the_spinner_frames_are_all_one_cell(self):
+        """A frame wider than one cell makes the row jitter as it animates."""
+        for frame in self.C.SPIN:
+            with self.subTest(frame=frame):
+                self.assertEqual(self.C.dwidth(frame), 1,
+                                 f"{frame!r} is not one cell wide")
+
+    def test_the_spinner_fills_its_cell(self):
+        """Width alone cannot express this: a braille frame is also one cell
+        wide, and it was the one that read as a narrow rectangle, because a
+        braille cell is two dots across and four tall. The rule actually
+        applied is that the frames come from Block Elements — the same family
+        as the accent bar — so each one paints the full cell."""
+        for frame in self.C.SPIN:
+            with self.subTest(frame=frame):
+                self.assertTrue(0x2580 <= ord(frame) <= 0x259F,
+                                f"{frame!r} is not a block element; a braille "
+                                f"or dot spinner reads as a thin rectangle")
+
+    def test_the_placeholder_is_counted_as_live(self):
+        """`to_bottom()` follows the stream by this measurement."""
+        c = self.console({"model": "qwen", "req_bytes": 100,
+                          "state": "prefill"})
+        self.assertGreater(c._live_lines, 0)
+
+
+class BlocksStartAtTheLeftEdge(TapTest):
+    """A two-column margin made the accent bars look indented rather than
+    justified, and cost two columns on every line of every message."""
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def test_the_margin_is_a_named_constant(self):
+        self.assertEqual(self.C.LEFT, 0)
+
+    def test_every_accent_bar_is_in_the_same_column(self):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(i) for i in range(3)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": False, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.msg = ""; c.msg_until = 0; c.tick = 0
+        c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        cols = {l.index(C.BAR) for l in
+                ["".join(ch for _, ch, _ in s) for s in c.lines]
+                if C.BAR in l}
+        self.assertEqual(cols, {C.LEFT},
+                         f"accent bars are not all at column {C.LEFT}: {cols}")

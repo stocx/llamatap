@@ -105,7 +105,15 @@ INFLIGHT = os.environ.get("LLAMATAP_INFLIGHT",
 # Braille spinners look great in screenshots and render as mush in plenty of
 # terminal fonts — it came out as ".:" here. ASCII always works; override with
 # LLAMATAP_SPINNER if your font handles something nicer.
-SPIN = os.environ.get("LLAMATAP_SPINNER", "⠏⠛⠹⢸⣰⣤⣆⡇")
+# A braille cell is two dots wide and four tall, so a braille spinner reads as
+# a narrow rectangle flickering in place. These are the same Block Elements
+# family as the accent bar, and each frame fills the cell squarely.
+SPIN = os.environ.get("LLAMATAP_SPINNER", "▌▀▐▄")
+
+#: Every block starts hard against the left edge. A two-column margin made the
+#: accent bars look indented rather than justified, and it is two columns off
+#: every line of every message.
+LEFT = 0
 # A `+` in its own colour is the affordance: it says "there is more here".
 C_PLUS, C_DIM, C_BODY, C_OFF = "\033[32m", "\033[36m", "\033[37m", "\033[0m"
 RUNS = os.environ.get("LLAMATAP_RUNS") or os.path.join(_STATE, "runs")
@@ -728,7 +736,7 @@ class Console:
         click target and the drawn text then cannot disagree, which is the way
         a hand-placed label and a hand-placed hotspot always eventually do.
         """
-        out, x = [], 2 + dwidth("in this thread:") + 2
+        out, x = [], LEFT + dwidth("in this thread:") + 2
         for party, label in (("you", "you"), ("harness", harness),
                              ("server", server), ("model", model)):
             out.append((party, label, x, x + dwidth(label)))
@@ -1002,10 +1010,16 @@ class Console:
                 # thinking`, `→ tool result`, `→ error`. A bare "opencode"
                 # here was indistinguishable from opencode saying something,
                 # which is exactly what the next block often is.
-                # "→ request" rather than "→ system prompt": the block holds
-                # the tool definitions too, and frequently they are the larger
-                # half of it.
-                who = f"{m.get('name')} → request"
+                #
+                # "setup", not "request": the harness is not asking for
+                # anything here, it is establishing standing instructions and
+                # the tools that exist. "Request" is the HTTP word for the
+                # envelope, which is why the rows underneath still measure
+                # themselves as a share "of the request" — that is the
+                # payload. This row names what the harness is doing.
+                # Not "system prompt" either: the tool definitions are in
+                # here too, and are frequently the larger half.
+                who = f"{m.get('name')} → setup"
 
 
             if m.get("repeat"):
@@ -1056,13 +1070,13 @@ class Console:
                 # thought read as belonging to whoever spoke last — and its
                 # cost sat INSIDE the bar, where a tool result puts it beside
                 # the name instead.
-                lbl = f"  {' ' * pad}{who}"
+                lbl = f"{' ' * (LEFT + pad)}{who}"
                 gap = " " * max(2, W - dwidth(lbl) - dwidth(note) - 3)
                 self.emit(f"\033[33m{lbl}{C_OFF}{gap}{C_DIM}{note}{C_OFF}")
                 self._bar = "\033[33m"
                 self.emit_node(m.get("rec", 0), self.recs[m.get("rec", 0)], None,
                                "thinking", key, "Thought", "", 1, True,
-                               base=2 + pad)
+                               base=LEFT + pad)
                 self._bar = ""
                 # The blank line between blocks is emitted at the END of the
                 # loop body, which this branch skips — so a thought was the
@@ -1085,13 +1099,13 @@ class Console:
             # left on EVERY row, costing ten characters of width to repeat the
             # same minute over and over; it now appears once, dim, at the foot
             # of the block it belongs to.
-            lbl = f"  {' ' * pad}{icon}{who}".rstrip() if not icon else \
-                  f"  {' ' * pad}{icon} {who}"
+            lbl = f"{' ' * (LEFT + pad)}{icon}{who}".rstrip() if not icon else \
+                  f"{' ' * (LEFT + pad)}{icon} {who}"
             gap = " " * max(2, W - dwidth(lbl) - dwidth(stat) - 3)
             self.emit(f"{col}{lbl}{C_OFF}{gap}{C_DIM}{stat}{C_OFF}")
             # The accent bar sits just in from the name, so the block reads as
             # belonging to the speaker named above it.
-            body_col = 2 + pad
+            body_col = LEFT + pad
 
             if kind == "setup":
                 # The bar belongs to the block, not to the body text. A setup
@@ -1225,22 +1239,44 @@ class Console:
         # written, so the view must go to the true bottom rather than to the
         # last completed exchange's header.
         live_from = len(self.lines)
+        hname = parties.get("harness") or "harness"
         for job in (self.inflight or []):
-            think, text = job.get("thinking") or "", job.get("text") or ""
-            if not (think or text):
-                continue
             sp = SPIN[self.tick % len(SPIN)]
             mdl = job.get("model") or model
+            # The REQUEST half of an exchange, held in place while it is in
+            # flight. Only the completed record carries the parsed request —
+            # the in-flight entry has its byte count and nothing else — so the
+            # system prompt, the harness's message and the tool list could not
+            # appear until the model had finished answering. They then arrived
+            # ABOVE the reply you had been watching stream, which reads as the
+            # thread reordering itself.
+            #
+            # A one-line placeholder with a spinner holds the position
+            # instead. Nothing jumps over anything: the request was always
+            # first, and now it looks it. Writing the whole 23 KB prompt into
+            # the in-flight file every request would also have fixed it, at
+            # the cost of that much churn per turn for a cosmetic gain.
+            nb = job.get("req_bytes") or 0
+            state = job.get("state") or "sending"
+            waited = f"{nb:,} bytes · {state}"
+            # "sending": what is known is that bytes have gone out and no
+            # reply has come back. The contents are not in the in-flight
+            # entry, so claiming anything more would be invention.
+            lbl = f"{' ' * LEFT}{hname} → sending {sp}"
+            gap = " " * max(2, W - dwidth(lbl) - dwidth(waited) - 3)
+            self.emit(f"{C_DIM}{lbl}{C_OFF}{gap}{C_DIM}{waited}{C_OFF}")
+
+            think, text = job.get("thinking") or "", job.get("text") or ""
             if think and not text:
                 # "(thinking) (thinking)" — the word was in the f-string
                 # twice, once from the label and once hardcoded beside it.
-                self.emit(f"\033[33m      live      {mdl} → thinking "
-                          f"{sp}{C_OFF}")
-                self.block(think, "\033[33m", 16, max(24, W2 - 22),
+                self.emit(f"\033[33m{' ' * LEFT}{mdl} → thinking {sp}{C_OFF}")
+                self.block(think, "\033[33m", LEFT, max(24, W2 - 2),
                            text_col=C_BODY)
             if text:
-                self.emit(f"\033[33m      live      {mdl} {sp}{C_OFF}")
-                self.block(text, "\033[33m", 16, max(24, W2 - 22))
+                self.emit(f"\033[33m{' ' * LEFT}{mdl} {sp}{C_OFF}")
+                self.block(text, "\033[33m", LEFT, max(24, W2 - 2))
+            self.emit("")
         self._live_lines = len(self.lines) - live_from
 
         for e in self.extra:
@@ -1806,7 +1842,7 @@ class Console:
         scr = self.scr
         self.fill(0, 0, W - 1)
         try:
-            scr.addnstr(0, 2, "in this thread:", W - 3,
+            scr.addnstr(0, LEFT, "in this thread:", W - 1 - LEFT,
                         curses.color_pair(18))
         except curses.error:
             pass
