@@ -30,7 +30,8 @@ import threading
 import time
 import unittest
 
-from _support import CHAT_OK, MockUpstream, TapTest, free_port, load, sse
+from _support import (CHAT_OK, TRUNCATED_ERROR, MockUpstream, RawUpstream,
+                      TapTest, free_port, load, sse)
 
 
 class ProxyHarness:
@@ -314,3 +315,63 @@ class Framing(TapTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TruncatedUpstreamError(TapTest):
+    """An upstream error body that stops partway must not hang the client.
+
+    `resp.read()` raises IncompleteRead. The handler cleared its in-flight
+    entry and closed upstream correctly, but returned WITHOUT sending the
+    client anything — so the connection stayed open and the harness waited for
+    headers until its own timeout. The partial body was discarded too, losing
+    the only evidence of what the upstream was complaining about.
+    """
+
+    def run_once(self):
+        with RawUpstream(TRUNCATED_ERROR) as up, ProxyHarness(up.url) as tap:
+            c = tap.conn(timeout=10)
+            c.request("POST", "/v1/chat/completions", BODY,
+                      {"Content-Type": "application/json"})
+            started = time.monotonic()
+            status, body, err = None, b"", None
+            try:
+                r = c.getresponse()
+                status, body = r.status, r.read()
+            except Exception as e:                  # pragma: no cover
+                err = e
+            took = time.monotonic() - started
+            c.close()
+            return status, body, err, took, tap.wait_records(1), tap
+
+    def test_the_client_gets_an_answer(self):
+        status, body, err, took, recs, tap = self.run_once()
+        self.assertIsNone(err, f"the client never got a response: {err!r}")
+        self.assertEqual(status, 500,
+                         "the upstream's status should be forwarded")
+
+    def test_the_partial_body_is_forwarded(self):
+        status, body, err, took, recs, tap = self.run_once()
+        self.assertEqual(body, b"partial-error",
+                         "the bytes that did arrive were thrown away")
+
+    def test_the_partial_body_is_recorded(self):
+        status, body, err, took, recs, tap = self.run_once()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["resp"], "partial-error")
+        self.assertEqual(recs[0]["status"], 500)
+
+    def test_the_recording_says_it_was_truncated(self):
+        """Otherwise a short error body reads as the whole story."""
+        status, body, err, took, recs, tap = self.run_once()
+        self.assertTrue(recs[0]["meta"].get("incomplete"),
+                        "nothing marks the exchange as incomplete")
+        # Deliberately not asserting the exception class: whether the read
+        # ends in IncompleteRead or ConnectionResetError depends on timing,
+        # and both mean the same thing. What must hold is that the failure is
+        # named at all.
+        self.assertTrue(recs[0]["meta"].get("upstream_read_error"),
+                        "the read failure is not recorded")
+
+    def test_in_flight_is_still_cleared(self):
+        status, body, err, took, recs, tap = self.run_once()
+        self.assertTrue(tap.wait_inflight_empty())

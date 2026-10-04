@@ -245,6 +245,15 @@ def _private(path):
     not — that leaves a window where the file exists and is readable.
     """
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        # The mode above applies only when the file is CREATED. An existing
+        # recording — left by an older version, or at a custom path outside
+        # the 0700 state directory — keeps whatever it had, so tighten it.
+        if os.fstat(fd).st_mode & 0o077:
+            os.fchmod(fd, 0o600)
+    except OSError:
+        # Not every filesystem supports it; writing still beats refusing.
+        pass
     return os.fdopen(fd, "a")
 
 
@@ -371,9 +380,44 @@ class Tap(http.server.BaseHTTPRequestHandler):
             # error is being written. Either used to leak the in-flight entry
             # and leave the upstream response open.
             resp, status, rhdrs = e, e.code, e.headers
-            err = b""
+            err, read_error = b"", None
+            # Accumulate rather than one read(). A truncated error body used
+            # to end the handler without ever answering the client, which then
+            # waited for headers that never came until its own timeout. And
+            # which exception ends the read depends on timing: IncompleteRead
+            # carries the bytes that arrived, ConnectionResetError does not —
+            # so collecting as we go is the only way to keep them in both
+            # cases. A partial error is still the best evidence of what the
+            # upstream was complaining about.
+            buf = bytearray()
             try:
-                err = resp.read()
+                while True:
+                    piece = resp.read1(65536)
+                    if not piece:
+                        break
+                    buf.extend(piece)
+            except Exception as re:
+                buf.extend(bytes(getattr(re, "partial", b"") or b""))
+                read_error = f"{type(re).__name__}: {re}"
+            err = bytes(buf)
+            # Detect the shortfall from the PROTOCOL, not from the exception.
+            # Which exception ends a cut-off body — IncompleteRead,
+            # ConnectionResetError, or none at all when the peer half-closes
+            # cleanly — depends on timing, and the clean-EOF case raises
+            # nothing, so an exception-only check silently accepted a body
+            # that was 13 bytes of a promised 100.
+            declared = rhdrs.get("Content-Length")
+            try:
+                declared = int(declared) if declared is not None else None
+            except ValueError:
+                declared = None
+            if declared is not None and len(err) < declared:
+                read_error = read_error or (
+                    f"short body: {len(err)} of {declared} bytes")
+            if read_error:
+                log(f"  upstream error body was truncated after "
+                    f"{len(err)} bytes: {read_error}")
+            try:
                 log(f"\n===== {status} {method} {self.path} =====")
                 if body:
                     try:
@@ -394,9 +438,12 @@ class Tap(http.server.BaseHTTPRequestHandler):
                     f"{type(inner).__name__}: {inner}")
             finally:
                 inflight_clear(key)
-                record(self.path, status, original, err,
-                       {"elapsed_ms": int((time.time() - t0) * 1000),
-                        **({"shims": list(self._shims)} if self._shims else {})})
+                meta = {"elapsed_ms": int((time.time() - t0) * 1000),
+                        **({"shims": list(self._shims)} if self._shims else {})}
+                if read_error:
+                    meta["upstream_read_error"] = read_error
+                    meta["incomplete"] = True
+                record(self.path, status, original, err, meta)
                 try:
                     resp.close()
                 except Exception:

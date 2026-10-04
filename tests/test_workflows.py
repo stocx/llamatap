@@ -327,3 +327,69 @@ class DisconnectDuringHeaders(TapTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClearEmptyFilePermissions(TapTest):
+    """`clear` must make an EXISTING empty recording private too.
+
+    The archive helper skips zero-byte files, so an empty recording is never
+    moved aside — `clear` truncates it in place. `umask` only governs file
+    CREATION, so a 0644 empty recording stayed 0644, and every capture of the
+    next session with it. The previous permission test started from a
+    non-empty file, which takes the archive path and therefore gets a freshly
+    created, private file by accident.
+    """
+
+    def modes(self):
+        return {os.path.basename(f): os.stat(f).st_mode & 0o777
+                for f in (self.rec_path, os.environ["LLAMATAP_LOG"])}
+
+    def clear_under_umask(self):
+        old = os.umask(0o022)
+        try:
+            return cli("clear")
+        finally:
+            os.umask(old)
+
+    def test_existing_empty_files_become_private(self):
+        for f in (self.rec_path, os.environ["LLAMATAP_LOG"]):
+            open(f, "w").close()
+            os.chmod(f, 0o644)
+        r = self.clear_under_umask()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for name, mode in self.modes().items():
+            with self.subTest(file=name):
+                self.assertEqual(mode, 0o600,
+                                 f"{name} stayed world-readable after clear")
+
+    def test_a_mix_of_empty_and_nonempty(self):
+        seed(self.rec_path)                       # non-empty: archived away
+        open(os.environ["LLAMATAP_LOG"], "w").close()   # empty: skipped
+        for f in (self.rec_path, os.environ["LLAMATAP_LOG"]):
+            os.chmod(f, 0o644)
+        r = self.clear_under_umask()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for name, mode in self.modes().items():
+            with self.subTest(file=name):
+                self.assertEqual(mode, 0o600, f"{name} is world-readable")
+
+    def test_the_whole_next_session_stays_private(self):
+        """The shape of the defect: clear, then let the proxy write."""
+        for f in (self.rec_path, os.environ["LLAMATAP_LOG"]):
+            open(f, "w").close()
+            os.chmod(f, 0o644)
+        self.clear_under_umask()
+        P = load("proxy")
+        P.record("/v1/chat/completions", 200, b'{"messages":[]}', b"{}", {})
+        self.assertEqual(os.stat(self.rec_path).st_mode & 0o777, 0o600,
+                         "the session's captures are world-readable")
+
+    def test_a_writer_tightens_a_loose_file_it_did_not_create(self):
+        """A recording at a custom path, outside the 0700 state directory,
+        may already exist with loose permissions. O_CREAT's mode applies only
+        at creation, so the writer has to fix it."""
+        open(self.rec_path, "w").close()
+        os.chmod(self.rec_path, 0o644)
+        P = load("proxy")
+        P.record("/v1/chat/completions", 200, b'{"messages":[]}', b"{}", {})
+        self.assertEqual(os.stat(self.rec_path).st_mode & 0o777, 0o600)

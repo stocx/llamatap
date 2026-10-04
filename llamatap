@@ -199,12 +199,16 @@ case "$cmd" in
     # destroyed the only copy of a result.
     if dest="$("$B/llamatap-archive.py" --runs "$LLAMATAP_RUNS" \
                  "$LLAMATAP_REC" "$LLAMATAP_LOG")"; then
-      # Recreate privately. A bare `: > file` creates 0644 under the usual
-      # umask of 022, and the proxy sets its mode only at CREATION — so an
-      # already-existing 0644 recording stayed world-readable for the whole
-      # next session. umask in a subshell sets the mode as the file is made,
-      # leaving no window where it exists and is readable.
+      # Recreate privately. Two cases, and only one used to be handled:
+      #   * the file was archived away, so this CREATES it — umask 077 covers
+      #     that, leaving no window where it exists and is readable
+      #   * the file was EMPTY, so the archiver skipped it and this truncates
+      #     it in place — umask does not apply to an existing file, so a 0644
+      #     empty recording stayed 0644 and the whole next session with it
+      # chmod first, so whatever is there is protected before anything else.
+      chmod 600 "$LLAMATAP_LOG" "$LLAMATAP_REC" 2>/dev/null || true
       ( umask 077; : > "$LLAMATAP_LOG"; : > "$LLAMATAP_REC" )
+      chmod 600 "$LLAMATAP_LOG" "$LLAMATAP_REC" 2>/dev/null || true
       if [ "$dest" = "nothing to archive" ]; then
         echo "recording was already empty"
       else

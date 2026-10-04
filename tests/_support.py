@@ -249,6 +249,71 @@ CHAT_OK = {"status": 200,
                       b'"usage":{"prompt_tokens":5,"completion_tokens":1}}']}
 
 
+class RawUpstream:
+    """An upstream that sends literal bytes, however malformed.
+
+    MockUpstream speaks through BaseHTTPRequestHandler, which will not emit a
+    Content-Length it then fails to honour — and that is exactly the case
+    worth testing: a server that promises a body and dies partway through it.
+    """
+
+    def __init__(self, raw):
+        self.raw = raw
+        self.requests = []
+        self._sock = socket.socket()
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(5)
+        self.port = self._sock.getsockname()[1]
+        self.url = f"http://127.0.0.1:{self.port}"
+        self._stop = False
+
+    def _serve(self):
+        while not self._stop:
+            try:
+                conn, _ = self._sock.accept()
+            except OSError:
+                return
+            try:
+                self.requests.append(conn.recv(65536))
+                conn.sendall(self.raw)
+                # Half-close rather than close(). close() straight after
+                # sendall can emit an RST that discards the bytes still in
+                # the kernel buffer, so the client sometimes saw none of the
+                # partial body — flaky, and a property of this mock rather
+                # than of the proxy. SHUT_WR delivers what was sent and then
+                # signals EOF, which is what a server dying mid-body does.
+                conn.shutdown(socket.SHUT_WR)
+                conn.settimeout(5)
+                try:
+                    while conn.recv(65536):
+                        pass
+                except OSError:
+                    pass
+            except OSError:
+                pass
+            finally:
+                conn.close()
+
+    def __enter__(self):
+        self._t = threading.Thread(target=self._serve, daemon=True)
+        self._t.start()
+        return self
+
+    def __exit__(self, *a):
+        self._stop = True
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+
+#: 500 that promises 100 bytes of error body and delivers 13, then hangs up
+TRUNCATED_ERROR = (b"HTTP/1.1 500 Internal Server Error\r\n"
+                   b"Content-Type: application/json\r\n"
+                   b"Content-Length: 100\r\n\r\npartial-error")
+
+
 def sse(*events):
     """An SSE body from a list of delta strings, ending in [DONE]."""
     out = []
