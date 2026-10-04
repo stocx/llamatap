@@ -42,7 +42,11 @@ def _curses_stub():
         color_pair=lambda n: n << 8,
         pair_number=lambda a: (a >> 8) & 0xff,
         A_COLOR=0xff00,
-        A_BOLD=0, A_REVERSE=0, A_UNDERLINE=0, A_DIM=0, A_NORMAL=0,
+        # Real, distinct bits outside the A_COLOR mask. These were all 0,
+        # so any test asserting an attribute was silently vacuous — two
+        # palette tests skipped themselves rather than checking anything.
+        A_BOLD=0x10000, A_REVERSE=0x20000, A_UNDERLINE=0x40000,
+        A_DIM=0x80000, A_NORMAL=0,
         # Narrow on purpose. It used to be `Exception`, so the `except
         # curses.error` guards around every draw swallowed real bugs —
         # an AttributeError inside an attribute helper made the whole

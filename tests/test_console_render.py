@@ -1683,3 +1683,64 @@ class CopyCarriesItsProvenance(PartyFilter):
     def test_the_header_is_still_absent_from_the_transcript(self):
         """It belongs to the copy and the pinned row, not to self.lines."""
         self.assertNotIn("in this thread", self.text_of(self.console()))
+
+
+class PaletteSelection(TapTest):
+    """Selecting a command must not highlight the panel's frame.
+
+    The row was drawn as "│" + body + "│" in one write, so A_REVERSE reached
+    both borders and the panel's own frame joined the selection.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def palette(self, rows=40, cols=140, sel=0):
+        C = self.C
+        cells = [[(" ", 0)] * cols for _ in range(rows)]
+
+        class Screen:
+            def getmaxyx(self):
+                return (rows, cols)
+
+            def erase(self):
+                pass
+
+            def refresh(self):
+                pass
+
+            def move(self, y, x):
+                pass
+
+            def addnstr(self, y, x, text, n, attr=0):
+                for ch in text[:max(0, n)]:
+                    if x >= cols:
+                        return
+                    cells[y][x] = (ch, attr)
+                    x += 1
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.cmd = ""; c.cmd_sel = sel
+        c.draw_palette()
+        return cells
+
+    def test_the_frame_is_never_reversed(self):
+        rev = self.C.curses.A_REVERSE
+        if not rev:
+            self.skipTest("the curses stub has no A_REVERSE bit")
+        for row in self.palette():
+            for ch, attr in row:
+                if ch in "│╭╮╰╯├┤─":
+                    self.assertFalse(attr & rev,
+                                     f"frame glyph {ch!r} is in the highlight")
+
+    def test_the_selected_row_is_still_highlighted(self):
+        """Removing the frame from the highlight must not remove the
+        highlight."""
+        rev = self.C.curses.A_REVERSE
+        if not rev:
+            self.skipTest("the curses stub has no A_REVERSE bit")
+        hit = [ch for row in self.palette()
+               for ch, attr in row if attr & rev and ch.strip()]
+        self.assertTrue(hit, "no row is highlighted at all")

@@ -1722,8 +1722,14 @@ class Console:
             name, args, desc = m
             left = f"/{name} {args}".strip()
             body = f" {left:<22}{desc}"
-            put(y0 + 3 + i, x0, "│" + body[:bw - 2].ljust(bw - 2) + "│",
+            # Three writes, not one. Drawing "│" + body + "│" as a single
+            # string applied A_REVERSE to the borders too, so selecting a row
+            # pulled the panel's own frame into the highlight. The frame
+            # belongs to the panel, not to the selection.
+            put(y0 + 3 + i, x0, "│", curses.color_pair(6))
+            put(y0 + 3 + i, x0 + 1, body[:bw - 2].ljust(bw - 2),
                 curses.A_REVERSE if sel else 0)
+            put(y0 + 3 + i, x0 + bw - 1, "│", curses.color_pair(6))
         if not matches:
             put(y0 + 3, x0, "│" + "  no match".ljust(bw - 2) + "│", curses.color_pair(1))
         put(y0 + 3 + rows, x0, "╰" + "─" * (bw - 2) + "╯", curses.color_pair(6))
