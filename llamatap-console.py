@@ -2901,6 +2901,11 @@ class Console:
         `makedirs(exist_ok=True)`, so clearing twice inside a minute silently
         overwrote the first archive.
         """
+        # Counted BEFORE archiving, so the note can say what was actually
+        # put away. "archived to runs/…" was printed even when the recording
+        # was empty and only the log moved, which reads as "it worked" when
+        # nothing was there — and sent the user round again.
+        n = len(self.recs)
         try:
             dest = ARCHIVE.archive([self.path, LOG], RUNS)
         except Exception as e:
@@ -2914,11 +2919,16 @@ class Console:
         except Exception as e:
             return self.note(f"archived to {dest}, but could not truncate: {e}")
         self.recs, self.extra, self.top, self.follow = [], [], 0, True
-        if dest:
+        if dest and n:
             name = os.path.basename(dest)
-            self.note(f"archived to runs/{name}/  "
+            self.note(f"archived {n:,} exchange(s) to runs/{name}/  "
                       f"(llamatap read --file {dest}/"
                       f"{os.path.basename(self.path)})", secs=12)
+        elif dest:
+            # The log had content and the recording did not.
+            self.note("no exchanges recorded — archived the log only. "
+                      "A request still in flight will land AFTER this.",
+                      secs=12)
         else:
             self.note("nothing to archive; recording was already empty")
         self.rebuild()

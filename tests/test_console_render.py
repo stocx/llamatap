@@ -3703,3 +3703,65 @@ class CrushShapedTraffic(TapTest):
         by = {m.get("text"): m["who"] for m in msgs}
         self.assertEqual(by.get("first"), "you")
         self.assertEqual(by.get("second"), "you")
+
+
+class ClearSaysWhatItDid(TapTest):
+    """"archived to runs/…" was printed even when the recording was empty and
+    only the LOG moved — which reads as "it worked" when nothing was there,
+    and sent the user round again. Three clears in fifty seconds, of which the
+    middle one archived a 310-byte log and no exchanges at all."""
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def console(self, recs):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = recs; c.path = C.REC
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.msg = ""; c.msg_until = 0; c.tick = 0
+        c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        return c
+
+    def test_it_reports_how_many_exchanges_were_archived(self):
+        C = self.C
+        with open(C.REC, "w") as f:
+            for i in range(3):
+                f.write(json.dumps(a_record(i)) + "\n")
+        c = self.console([a_record(i) for i in range(3)])
+        c.cmd_clear()
+        self.assertIn("3 exchange", c.msg, f"got: {c.msg!r}")
+
+    def test_an_empty_recording_says_so_rather_than_claiming_success(self):
+        C = self.C
+        open(C.REC, "w").close()
+        with open(C.LOG, "w") as f:
+            f.write("some log output\n")
+        c = self.console([])
+        c.cmd_clear()
+        self.assertIn("no exchanges recorded", c.msg, f"got: {c.msg!r}")
+        self.assertNotIn("archived 0", c.msg)
+
+    def test_it_warns_that_an_in_flight_request_lands_after(self):
+        """The actual cause of clearing three times: a request already in
+        flight completes and writes its record afterwards."""
+        C = self.C
+        open(C.REC, "w").close()
+        with open(C.LOG, "w") as f:
+            f.write("x\n")
+        c = self.console([])
+        c.cmd_clear()
+        self.assertIn("in flight", c.msg, f"got: {c.msg!r}")
