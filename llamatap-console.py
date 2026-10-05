@@ -176,11 +176,21 @@ PAIRS = {31: 1, 32: 2, 33: 3, 34: 4, 35: 5, 36: 6, 37: 7, 90: 8, 94: 9,
          # one per colour: a statistic drawn in its own colour on the default
          # background punches a hole in the panel it sits on.
          100: 10, 101: 11, 102: 12, 103: 13, 104: 14, 105: 15,
-         106: 16, 107: 17, 108: 18, 109: 19}
+         106: 16, 107: 17, 108: 18, 109: 19,
+         # Diff rows: the colour is the BACKGROUND, so a changed line reads as
+         # a band rather than as differently-tinted text. Foreground tinting
+         # is easy to miss on one short line among many, and illegible once a
+         # line wraps and only part of it is coloured.
+         110: 20, 111: 21}
 
 #: Every pair that carries the filled background. Derived from PAIRS so it
 #: cannot drift from it: codes at 100 and above are the panel codes.
 PANEL_PAIRS = frozenset(pair for code, pair in PAIRS.items() if code >= 100)
+
+#: Removed and added rows, as (pair, 256-colour background, 8-colour fallback).
+#: Dark backgrounds rather than the pure ANSI red and green, which are loud
+#: enough to drown the text they are meant to be showing.
+DIFF_BG = ((20, 52, "RED"), (21, 22, "GREEN"))
 
 #: The panel foreground, by pair number, for `boot()` to register.
 PANEL_FG = ((10, "WHITE"), (11, "GREEN"), (12, "CYAN"), (13, "YELLOW"),
@@ -269,20 +279,46 @@ def edit_pairs(args):
     return out
 
 
-def unified(old, new, label="", context=2):
-    """A unified diff of two strings, as lines.
+def unified(old, new, context=2):
+    """A diff of two strings as (line number, marker, text) rows.
 
     Both halves of an edit are on the wire, so what changed is observable and
     does not have to be read out of two blobs by eye. The raw strings are
     still exactly a `/raw` away, which is what makes showing a derived view
     here safe: a wrong diff costs legibility, never accuracy.
+
+    Rows rather than `difflib.unified_diff`'s text, because the line NUMBER of
+    each side has to survive to the screen — "which line" is most of what
+    makes a diff readable, and the `@@ -31,5 +31,5 @@` header makes a reader
+    count rows to work it out. A removed row carries its number in the old
+    text, an added row its number in the new, and an unchanged row the number
+    they share.
     """
     a = (old or "").split("\n")
     b = (new or "").split("\n")
-    rows = list(difflib.unified_diff(a, b, lineterm="", n=context,
-                                     fromfile=label, tofile=label))
-    # Drop the ---/+++ file headers: the path is already on the row above.
-    return [r for r in rows if not r.startswith(("---", "+++"))]
+    ops = difflib.SequenceMatcher(None, a, b).get_opcodes()
+    if all(tag == "equal" for tag, *_ in ops):
+        # Nothing changed. Returning context rows would show a "diff" whose
+        # every line is unchanged, which says the opposite of the truth.
+        return []
+    rows = []
+    for n, (tag, i1, i2, j1, j2) in enumerate(ops):
+        if tag != "equal":
+            rows += [(k + 1, "-", a[k]) for k in range(i1, i2)]
+            rows += [(k + 1, "+", b[k]) for k in range(j1, j2)]
+            continue
+        # Indices are ABSOLUTE into b throughout. Mixing absolute and
+        # relative here is what put a line 8 on screen numbered 15.
+        run = i2 - i1
+        head = 0 if n == 0 else min(context, run)
+        tail = 0 if n == len(ops) - 1 else min(context, run - head)
+        if head + tail >= run:
+            rows += [(j + 1, " ", b[j]) for j in range(j1, j2)]
+            continue
+        rows += [(j + 1, " ", b[j]) for j in range(j1, j1 + head)]
+        rows.append((None, "@", f"… {run - head - tail:,} unchanged lines"))
+        rows += [(j + 1, " ", b[j]) for j in range(j2 - tail, j2)]
+    return rows
 
 
 def on_panel(text, width=0):
@@ -922,22 +958,26 @@ class Console:
             # with nothing beside them, which reads as the block having
             # stopped early. `block()` already strips these; a node body is
             # the same block and needs the same guard.
-            while body_lines and not body_lines[-1].strip():
+            while body_lines and not (
+                    body_lines[-1][2].strip()
+                    if isinstance(body_lines[-1], tuple)
+                    else body_lines[-1].strip()):
                 body_lines.pop()
             for ln in body_lines:
                 tc, mark = C_BODY, ""
-                if kind == "diff" and ln and ln[0] in "+-@ ":
-                    # Added green, removed red, hunk headers dim. Once a long
-                    # line wraps, the colour is the only thing left saying
-                    # which side it is on, so it is not decoration.
-                    tc = {"+": "\033[32m", "-": "\033[31m",
-                          "@": C_DIM}.get(ln[0], C_BODY)
-                    # The marker is split off so the REST keeps its own
-                    # leading whitespace. `_wrap` preserves indentation at the
-                    # start of a line, and a diff line starts with `+` or `-`,
-                    # so the code's indentation was collapsed — the exact
-                    # defect fixed for everything else in 27061ad.
-                    mark, ln = ln[0], ln[1:]
+                if kind == "diff" and isinstance(ln, tuple):
+                    # (line number, marker, text). The number is most of what
+                    # makes a diff readable, and `@@ -31,5 +31,5 @@` makes a
+                    # reader count rows to work it out.
+                    no, mk, ln = ln
+                    tc = {"+": "\033[111m", "-": "\033[110m",
+                          "@": C_DIM}.get(mk, C_BODY)
+                    # The gutter is part of the prefix, so the REST keeps its
+                    # own leading whitespace. `_wrap` preserves indentation at
+                    # the start of a line, and a diff line starts with its
+                    # marker, so the code's indentation was collapsed — the
+                    # exact defect fixed for everything else in 27061ad.
+                    mark = f"{no if no is not None else '':>5} {mk} "
                 # The colour goes AFTER the indent, not before it: `ind`
                 # carries the accent bar and C_PANEL, and C_PANEL reset the
                 # foreground, so a prefix colour was overridden every time.
@@ -1314,8 +1354,8 @@ class Console:
                         nid = (rec_i, "diff", key)
                         if nid not in self.touched:
                             self.open.add(nid)
-                        adds = sum(1 for r in rows if r.startswith("+"))
-                        dels = sum(1 for r in rows if r.startswith("-"))
+                        adds = sum(1 for r in rows if r[1] == "+")
+                        dels = sum(1 for r in rows if r[1] == "-")
                         self.emit_node(rec_i, self.recs[rec_i], None,
                                        "diff", key, "diff",
                                        f"+{adds:,} −{dels:,} lines", 1, True,
@@ -2879,6 +2919,11 @@ def main():
         panel_bg = 236 if getattr(curses, "COLORS", 8) >= 256 else curses.COLOR_BLACK
         for pair, name in PANEL_FG:
             curses.init_pair(pair, getattr(curses, f"COLOR_{name}"), panel_bg)
+        wide = getattr(curses, "COLORS", 8) >= 256
+        for pair, bg256, fallback in DIFF_BG:
+            curses.init_pair(pair, curses.COLOR_WHITE,
+                             bg256 if wide else getattr(curses,
+                                                        f"COLOR_{fallback}"))
         try:
             Console(scr, a.file, a.name, opts).run()
         except KeyboardInterrupt:

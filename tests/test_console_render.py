@@ -2944,21 +2944,42 @@ class EditsRenderAsDiffs(TapTest):
     # ---- the diff itself ----
     def test_a_change_shows_both_sides(self):
         rows = self.C.unified("a\nb\nc", "a\nB\nc")
-        self.assertTrue(any(r == "-b" for r in rows), rows)
-        self.assertTrue(any(r == "+B" for r in rows), rows)
+        self.assertIn((2, "-", "b"), rows, rows)
+        self.assertIn((2, "+", "B"), rows, rows)
 
-    def test_file_headers_are_dropped(self):
-        """The path is already on the row above; repeating it twice as
-        ---/+++ is noise."""
-        for r in self.C.unified("a", "b"):
-            self.assertFalse(r.startswith(("---", "+++")), r)
+    def test_each_row_carries_its_own_line_number(self):
+        """"Which line" is most of what makes a diff readable, and a
+        `@@ -31,5 +31,5 @@` header makes a reader count rows to work it out."""
+        rows = self.C.unified("a\nb\nc\nd", "a\nb\nC\nd")
+        self.assertIn((3, "-", "c"), rows, rows)
+        self.assertIn((3, "+", "C"), rows, rows)
+        self.assertIn((4, " ", "d"), rows, rows)
+
+    def test_a_removed_row_is_numbered_in_the_old_text(self):
+        """And an added row in the new, which is what lets the two columns
+        disagree when lines are inserted."""
+        rows = self.C.unified("a\nb\nc", "a\nX\nY\nb\nc")
+        added = [r for r in rows if r[1] == "+"]
+        self.assertEqual([(n, t) for n, _m, t in added],
+                         [(2, "X"), (3, "Y")], rows)
+
+    def test_a_long_unchanged_run_is_elided_and_says_so(self):
+        big = "\n".join(f"l{i}" for i in range(40))
+        rows = self.C.unified(big, big.replace("l20", "CHANGED"))
+        self.assertTrue(any(m == "@" and "unchanged" in t
+                            for _n, m, t in rows),
+                        "a 40-line file showed every unchanged row")
+        self.assertLess(len(rows), 20, "nothing was actually elided")
 
     def test_identical_sides_produce_nothing(self):
+        """Not a diff whose every row is unchanged, which says the opposite
+        of the truth."""
         self.assertEqual(self.C.unified("same", "same"), [])
+        self.assertEqual(self.C.unified("a\nb\nc", "a\nb\nc"), [])
 
     def test_an_insert_into_nothing_works(self):
         rows = self.C.unified("", "added")
-        self.assertTrue(any(r.startswith("+") for r in rows), rows)
+        self.assertTrue(any(m == "+" for _n, m, _t in rows), rows)
 
     # ---- rendering ----
     def console(self, args, rawjson=False):
@@ -3004,16 +3025,44 @@ class EditsRenderAsDiffs(TapTest):
         self.assertTrue(any("+" in l and "return 2" in l for l in rows),
                         "the added line is missing")
 
+    def test_each_rendered_row_shows_its_line_number(self):
+        rows = [l for l in self.rows(self.console(self.EDIT))
+                if "return" in l]
+        self.assertTrue(rows, "no diff rows rendered")
+        for row in rows:
+            with self.subTest(row=row):
+                self.assertRegex(row, r"\s2\s+[-+]\s",
+                                 f"no line number in the gutter: {row!r}")
+
+    def test_the_change_is_marked_by_background_not_by_text_colour(self):
+        """Tinted text is easy to miss on one short line among many, and
+        illegible once a line wraps and only part of it is coloured."""
+        C = self.C
+        c = self.console(self.EDIT)
+        pairs = set()
+        for spans in c.lines:
+            for _col, chunk, attr in spans:
+                if "return 1" in chunk or "return 2" in chunk:
+                    pairs.add(C.curses.pair_number(attr))
+        self.assertTrue(pairs, "no diff text found on screen")
+        for p in pairs:
+            with self.subTest(pair=p):
+                self.assertIn(p, [d[0] for d in C.DIFF_BG],
+                              "a diff row is not using a diff background")
+
     def test_the_diff_keeps_the_code_s_indentation(self):
         """`_wrap` preserves whitespace at the start of a line, and a diff
         line starts with `+` or `-` — so without splitting the marker off
         first, the indentation of the code itself collapsed. The same defect
         27061ad fixed everywhere else, reappearing one layer in."""
         rows = self.rows(self.console(self.EDIT))
-        for want in ("-    return 1", "+    return 2"):
+        # The property, not the spelling: the code's own indentation is still
+        # attached to the code. Asserting "-    return 1" pinned the gutter's
+        # layout as well, and broke the moment line numbers were added.
+        for want in ("    return 1", "    return 2"):
             with self.subTest(want=want):
                 self.assertTrue(
-                    any(want in l for l in rows),
+                    any(l.endswith(want) for l in rows),
                     f"indentation lost: {[l for l in rows if 'return' in l]}")
 
     def test_a_deeply_indented_change_keeps_every_level(self):
@@ -3021,7 +3070,7 @@ class EditsRenderAsDiffs(TapTest):
                           "oldString": "if a:\n    if b:\n        x = 1\n",
                           "newString": "if a:\n    if b:\n        x = 2\n"})
         rows = self.rows(c)
-        self.assertTrue(any("-        x = 1" in l for l in rows),
+        self.assertTrue(any(l.endswith("        x = 1") for l in rows),
                         f"nesting collapsed: {[l for l in rows if 'x =' in l]}")
 
     def test_the_node_states_the_size_of_the_change(self):

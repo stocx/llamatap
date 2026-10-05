@@ -312,9 +312,28 @@ the same on every start, so you never have to remember to.
 ### Edits are shown as diffs
 
 An `edit` call carries both halves on the wire, so what changed is observable
-and does not have to be read out of two blobs by eye. They render as one
-unified diff — added green, removed red — inside the same collapsible node
-every other long argument gets.
+and does not have to be read out of two blobs by eye. They render as one diff
+inside the same collapsible node every other long argument gets:
+
+```
+  qwen3.5-35b-moe → tool call [edit]                334 tokens · 5.9s · 57 t/s
+  ▌ filePath: utils/phone_validator.py
+  ▌ − diff   +3 −0 lines
+  ▌      1   def validate_phone(phone):
+  ▌      2       """Validate a phone number format."""
+  ▌      3 +     digits = re.sub(r"[^\d]", "", phone)
+  ▌      4 +     if len(digits) < 7:
+  ▌      5 +         return False
+  ▌      6       pattern = r"^[\+]?[(]?[0-9]{1,4}..."
+```
+
+**The colour is the background, not the text.** Tinted text is easy to miss on
+one short line among many, and illegible once a line wraps and only part of it
+carries the colour. **Every row is numbered**, because "which line" is most of
+what makes a diff readable and a `@@ -31,5 +31,5 @@` header makes you count
+rows to work it out. A removed row carries its number in the old text, an
+added row its number in the new, so the two disagree wherever lines were
+inserted. A long unchanged run is elided and says how many rows it swallowed.
 
 The two halves are found by SHAPE, not by one harness's spelling: any argument
 whose name starts with "old" pairs with the one whose name is the same with
