@@ -1784,10 +1784,12 @@ class Console:
         return len(self.dash(self.scr.getmaxyx()[1]))
 
     def view_h(self):
-        # conversation + status + command line, and the dashboard too when it
-        # is at the bottom.
-        # -1 more for the pinned party header row at the top.
-        h = self.scr.getmaxyx()[0] - 3
+        # Every row the conversation does NOT get: the status bar, the command
+        # line, and the pinned header. Derived from HEADER_H rather than
+        # hardcoded — it was `- 3` when the header was one row, and stayed 3
+        # when the header grew a rule, so the transcript was drawn one row too
+        # far and the status bar painted over its last line.
+        h = self.scr.getmaxyx()[0] - 2 - HEADER_H
         if self.stats_where() == "bottom":
             h -= self.dash_h() + 1        # +1 for the separator rule
         return max(1, h)
@@ -2373,7 +2375,11 @@ class Console:
         chips = getattr(self, "chips", None)
         if not chips:
             return ""
-        show = getattr(self, "show", None) or set(PARTIES)
+        # `or` would substitute the default for an EMPTY set, which is a
+        # deliberate "hide everything" rather than an absent filter — the copy
+        # then claimed every party was showing while containing none of them.
+        show = getattr(self, "show", None)
+        show = set(PARTIES) if show is None else show
         names = [label if party in show else f"({label})"
                  for party, label, _x0, _x1 in chips]
         line = "in this thread:  " + "   ".join(names)
@@ -2414,10 +2420,16 @@ class Console:
             # hidden it still claimed every exchange while copying a
             # fraction of them — a confirmation that overstates its own
             # result is worse than none.
-            show = getattr(self, "show", None) or set(PARTIES)
-            scope = ("" if set(show) == set(PARTIES)
-                     else " · " + ", ".join(p for p in PARTIES if p in show)
-                          + " only")
+            show = getattr(self, "show", None)
+            show = set(PARTIES) if show is None else show
+            if set(show) == set(PARTIES):
+                scope = ""
+            elif not show:
+                # Not an empty list of names, which reads as no filter at all.
+                scope = " · every party hidden"
+            else:
+                scope = " · " + ", ".join(p for p in PARTIES
+                                          if p in show) + " only"
             self.note(f"copied {len(text):,} chars, "
                       f"{text.count(chr(10)) + 1:,} lines"
                       f"{', raw' if raw else ''}{scope} via {tool}")

@@ -2724,3 +2724,163 @@ class InFlightLiveness(TapTest):
         self.assertEqual(C.read_inflight(), [])
         os.remove(C.INFLIGHT)
         self.assertEqual(C.read_inflight(), [])
+
+
+class ViewportFitsTheChrome(TapTest):
+    """The transcript must not be drawn into a row the chrome owns.
+
+    `view_h()` hardcoded `- 3`: two status rows plus a one-row header. When
+    the header grew a rule it stayed 3, so the last transcript row was drawn
+    at the status bar's row and immediately painted over. Nothing caught it —
+    the geometry tests compare view_h against itself across statistics modes,
+    which stays consistent whether the constant is right or wrong.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def grid(self, rows, cols, stats="off"):
+        C = self.C
+        cells = [[" "] * cols for _ in range(rows)]
+
+        class Screen:
+            def getmaxyx(self):
+                return (rows, cols)
+
+            def erase(self):
+                for r in cells:
+                    r[:] = [" "] * cols
+
+            def refresh(self):
+                pass
+
+            def addnstr(self, y, x, text, n, attr=0):
+                for ch in text[:max(0, n)]:
+                    if x >= cols:
+                        return
+                    cells[y][x] = ch
+                    x += 1
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(i) for i in range(12)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": stats}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.msg = ""; c.msg_until = 0; c.tick = 0
+        c.cmd = None; c.busy = ""
+        c._flags = "-ngl 999"; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        c.draw()
+        return c, ["".join(r) for r in cells]
+
+    def test_the_last_transcript_row_is_not_under_the_status_bar(self):
+        for rows in range(10, 44):
+            for stats in ("off", "right", "bottom"):
+                with self.subTest(rows=rows, stats=stats):
+                    c, _ = self.grid(rows, 140, stats)
+                    last = c.view_h() - 1 + self.C.HEADER_H
+                    self.assertLessEqual(
+                        last, rows - 3,
+                        f"the transcript reaches row {last}, and rows "
+                        f"{rows - 2} and {rows - 1} belong to the chrome")
+
+    def test_the_last_transcript_row_actually_reaches_the_screen(self):
+        """The arithmetic above could be right while draw() still drops it."""
+        rows, cols = 40, 140
+        c, g = self.grid(rows, cols)
+        i = c.top + c.view_h() - 1
+        self.assertLess(i, len(c.lines), "the fixture is shorter than a screen")
+        want = "".join(ch for _, ch, _ in c.lines[i]).strip()
+        if want:
+            self.assertIn(want[:30], g[c.view_h() - 1 + self.C.HEADER_H],
+                          "the last transcript row is missing from the grid")
+
+    def test_the_bottom_panel_draws_its_last_row(self):
+        rows, cols = 40, 160
+        c, g = self.grid(rows, cols, "bottom")
+        panel = c.dash(cols)
+        first = c.view_h() + self.C.HEADER_H + 1
+        self.assertLessEqual(
+            first + len(panel) - 1, rows - 3,
+            f"the dashboard's last row lands on the chrome")
+
+
+class CopyWithEverythingHidden(TapTest):
+    """An empty filter is a CHOICE, not an absent one.
+
+    `show or set(PARTIES)` substituted the default for an empty set, so a copy
+    taken with every party hidden claimed they were all showing — and omitted
+    the note saying it had been filtered at all.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def console(self, show):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(i) for i in range(3)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(show); c.chips = []
+        c.inflight = []; c.msg = ""; c.msg_until = 0; c.tick = 0
+        c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        return c
+
+    def test_an_all_hidden_copy_says_it_was_filtered(self):
+        text = self.console([]).buffer_text()
+        self.assertIn("hidden by the filter", text,
+                      "a copy with every party hidden claims to be complete")
+
+    def test_every_party_is_marked_hidden(self):
+        c = self.console([])
+        text = c.buffer_text()
+        for _party, label, _a, _b in c.chips:
+            with self.subTest(label=label):
+                self.assertIn(f"({label})", text,
+                              f"{label} is not marked as hidden")
+
+    def test_the_body_is_empty_when_everything_is_hidden(self):
+        c = self.console([])
+        body = c.buffer_text().split("\n", 2)[-1]
+        self.assertNotIn("hello", body)
+        self.assertNotIn("reply 0", body)
+
+    def test_the_copy_note_says_everything_was_hidden(self):
+        """Asserting the ABSENCE of party names was blind: when the bug
+        substituted the default, the note said nothing about filtering either,
+        so both the right and wrong behaviour passed. It has to assert what
+        the note positively says."""
+        c = self.console([])
+        c.cmd_copy([])
+        self.assertIn("every party hidden", c.msg,
+                      f"the copy note claims nothing was filtered: {c.msg!r}")
+
+    def test_a_partial_filter_names_the_parties_shown(self):
+        c = self.console(["you"])
+        c.cmd_copy([])
+        self.assertIn("you only", c.msg, f"got: {c.msg!r}")
+
+    def test_an_unfiltered_copy_note_mentions_no_filter(self):
+        c = self.console(self.C.PARTIES)
+        c.cmd_copy([])
+        for word in ("only", "hidden"):
+            self.assertNotIn(word, c.msg,
+                             f"an unfiltered copy claims a filter: {c.msg!r}")
