@@ -175,13 +175,13 @@ publishes the parsed request once per request, beside the small entry it
 rewrites per token, so the console can draw the prompt immediately without
 re-serialising a 23 KB system prompt hundreds of times a reply.
 
-In-flight content is attributed to the **harness**, whatever role the message
-carries. The harness demonstrably sent those bytes; whether they came from you
-or from a side-call of its own is decided structurally and needs the whole
-thread, which is not knowable until the record lands. A title generator's
-prompt rendered as something you typed is the one mistake worth avoiding
-there, so nothing is attributed until it can be. The expandable nodes are
-inert for those few seconds and work normally the moment the record arrives.
+Only the turns that are **new** are drawn, and they are attributed by the same
+structural test the completed thread uses: a side-call carries its own system
+prompt, compared here against the last completed request. Both blanket rules
+are wrong, and both were tried — attributing everything to the user puts a
+title generator's prompt in your mouth, and attributing everything to the
+harness puts your own "hello" in opencode's. The expandable nodes are inert
+for those few seconds and work normally the moment the record arrives.
 
 ### The dashboard
 

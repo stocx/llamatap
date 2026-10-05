@@ -3401,7 +3401,7 @@ class TheQuestionIsVisibleWhileAnswered(TapTest):
         {"role": "user",
          "content": "Generate a title for this conversation:\nwrite code"}]}
 
-    def console(self, reqs=None, job=None):
+    def console(self, reqs=None, job=None, recs=None):
         C = self.C
 
         class Screen:
@@ -3409,7 +3409,11 @@ class TheQuestionIsVisibleWhileAnswered(TapTest):
                 return (40, 116)
 
         c = C.Console.__new__(C.Console)
-        c.scr = Screen(); c.recs = []
+        # A completed main exchange first. A side-call is told from a main
+        # turn by carrying its OWN system prompt, so with no prior record
+        # there is nothing to compare against and nothing can be a side call —
+        # which made the first version of these tests test the wrong branch.
+        c.scr = Screen(); c.recs = recs if recs is not None else [a_record(0)]
         c.name = "opencode"; c.extra = []; c.follow = False; c.top = 0
         c.opts = {"rawjson": False, "preamble": False, "flags": False,
                   "repeats": False, "fold_thinking": False, "stats": "off"}
@@ -3440,19 +3444,50 @@ class TheQuestionIsVisibleWhileAnswered(TapTest):
         a = next(i for i, l in enumerate(rows) if "weighing it" in l)
         self.assertLess(q, a, "the answer is drawn above the question")
 
-    def test_it_is_not_attributed_to_the_user(self):
-        """A title generator's prompt rendered as something YOU typed is the
-        one mistake worth avoiding here. Whether a request is a side-call is
-        decided structurally and needs the whole thread, which is not knowable
-        until the record lands — so nothing is attributed until it can be."""
-        rows = self.rows(self.console())
-        i = next(i for i, l in enumerate(rows) if "Generate a title" in l)
-        header = [l for l in rows[:i] if l.strip()][-1]
-        self.assertIn("opencode", header,
-                      f"the harness's own prompt is attributed elsewhere: "
-                      f"{header!r}")
-        self.assertNotRegex(header, r"^\s*you\b",
+    def speaker_of(self, rows, needle):
+        i = next(i for i, l in enumerate(rows) if needle in l)
+        return [l for l in rows[:i] if l.strip()][-1]
+
+    def test_a_side_call_is_not_attributed_to_the_user(self):
+        """A title generator's prompt rendered as something YOU typed puts
+        words in your mouth. It carries its own system prompt, which is how
+        the completed thread tells a side-call apart, and the same test works
+        in flight against the last completed request."""
+        head = self.speaker_of(self.rows(self.console()), "Generate a title")
+        self.assertIn("opencode", head, f"got: {head!r}")
+        self.assertNotRegex(head.strip(), r"^you\b",
                             "claimed the user typed it")
+
+    def test_your_own_message_is_still_yours(self):
+        """The opposite error, and the one the first fix introduced:
+        attributing everything in flight to the harness put the user's own
+        "hello" in opencode's mouth."""
+        same_prompt = {"model": "qwen", "messages": [
+            {"role": "system", "content": "# Tone\nbe terse"},
+            {"role": "user", "content": "write some code"}]}
+        rows = self.rows(self.console(reqs={"k1": same_prompt}))
+        head = self.speaker_of(rows, "write some code")
+        self.assertRegex(head.strip(), r"^you\b",
+                         f"the user's own message is attributed elsewhere: "
+                         f"{head!r}")
+
+    def test_a_turn_already_shown_is_not_drawn_again(self):
+        """A title generator quotes the conversation back, so its final turn
+        is the user's own earlier message. Taking the LAST turn replayed
+        "hello" as though it were a fresh prompt and never showed the actual
+        instruction."""
+        quoting = {"model": "qwen", "messages": [
+            {"role": "system", "content": "<task>\nGenerate a title.\n</task>"},
+            {"role": "user", "content": "Generate a title for this conversation:"},
+            {"role": "user", "content": "hello"}]}
+        c = self.console(reqs={"k1": quoting},
+                         recs=[a_record(0, text="hello")])
+        rows = self.rows(c)
+        live = rows[next(i for i, l in enumerate(rows) if "sending" in l):]
+        self.assertTrue(any("Generate a title" in l for l in live),
+                        "the actual instruction is missing")
+        self.assertFalse(any(l.strip().endswith("hello") for l in live),
+                         f"an already-shown turn was replayed: {live}")
 
     def test_the_size_is_reported(self):
         rows = self.rows(self.console())

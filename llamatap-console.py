@@ -1587,6 +1587,17 @@ class Console:
         # yet, so detection has nothing to work from and the in-flight rows
         # would say "harness" when the name is already known.
         hname = parties.get("harness") or self.name or "harness"
+        # Everything the completed thread has already shown, so an in-flight
+        # request only draws what is actually new.
+        already = {(m.get("text") or "").strip() for m in msgs}
+        # The system prompt of the most recent COMPLETED request, for the
+        # side-call test used on in-flight turns below.
+        last_pre = None
+        if self.recs:
+            try:
+                last_pre = T.normalise(self.recs[-1].get("req"))[0].strip()
+            except Exception:
+                last_pre = None
         # Nothing is suppressed by COMPARING TEXT here, and deliberately so.
         # The proxy clears the in-flight entry before it writes the record —
         # see the `finally` in llamatap-proxy — so the normal path produces a
@@ -1622,26 +1633,46 @@ class Console:
             # read — the disorder was never the row, it was the prompt.
             req = (getattr(self, "inflight_reqs", None) or {}).get(
                 job.get("key") or "")
-            note, asked = waited, ""
+            note, asked = waited, []
             if isinstance(req, dict):
                 pre, turns = T.normalise(req)
                 n = len(pre) + sum(len(json.dumps(t))
                                    for t in (req.get("tools") or []))
                 note = f"{n:,} chars · ~{n // 4:,} tokens · {state}"
-                if turns:
-                    asked = turns[-1].get("text") or ""
-            # Attributed to the HARNESS, whatever the last turn's role says.
-            # The harness demonstrably sent these bytes; whether they came
-            # from you or from a side-call of its own is decided
-            # structurally, and that needs the whole thread — which is not
-            # knowable until the record lands. Rendering a title generator's
-            # prompt as something YOU typed is the one mistake worth
-            # avoiding here, so nothing is attributed until it can be.
+                # The turns that are NEW — the same rule the thread itself
+                # uses. Taking the LAST turn was wrong in the case that
+                # matters most: a title generator quotes the conversation
+                # back, so its final turn is the user's own earlier message
+                # and the actual instruction sits above it. The console then
+                # replayed "hello" as though it were a fresh prompt and never
+                # showed the request that had been made.
+                asked = [(t.get("who"), t.get("text") or "") for t in turns
+                         if (t.get("text") or "").strip() not in already]
+            # Attribution uses the SAME structural test the completed thread
+            # does: a side-call carries its own system prompt. Comparing the
+            # in-flight preamble against the last completed one answers it
+            # without waiting for the record, so a message does not change
+            # speaker when it lands.
+            #
+            # Blanket rules are wrong in both directions, and both were tried:
+            # attributing everything to the user puts a title generator's
+            # prompt in your mouth, and attributing everything to the harness
+            # puts your own "hello" in opencode's.
+            side = bool(isinstance(req, dict) and last_pre is not None
+                        and T.normalise(req)[0].strip() != last_pre)
             lbl = f"{' ' * LEFT}{hname} → sending {sp}"
             gap = " " * max(2, W - dwidth(lbl) - dwidth(note) - 3)
             self.emit(f"{C_DIM}{lbl}{C_OFF}{gap}{C_DIM}{note}{C_OFF}")
-            if asked:
-                self.block(asked, C_DIM, LEFT, max(24, W2 - 2),
+            for twho, text in asked:
+                if side:
+                    name, col_ = hname, "\033[36m"
+                else:
+                    name, col_ = {
+                        "you": ("you", "\033[32m"),
+                        "model": (mdl, "\033[33m"),
+                    }.get(twho, (f"{hname} → tool result", "\033[36m"))
+                self.emit(f"{col_}{' ' * LEFT}{name}{C_OFF}")
+                self.block(text, col_, LEFT, max(24, W2 - 2),
                            text_col=C_BODY)
             self.emit("")
 
