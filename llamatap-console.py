@@ -154,20 +154,34 @@ def dwidth(text):
         # so len() is exact — and this skips 900,000 dict lookups per rebuild.
         return len(text)
     w = 0
+    prev = None
     for ch in text:
+        if ch == "\ufe0f":
+            # VS16 forces emoji presentation on the character before it,
+            # which makes that pair two cells. The selector itself occupies
+            # none.
+            if prev is not None and _CELLS.get(prev) == 1:
+                w += 1
+            prev = None
+            continue
         cw = _CELLS.get(ch)
         if cw is None:
-            o = ord(ch)
             if unicodedata.combining(ch):
                 cw = 0
-            elif unicodedata.east_asian_width(ch) in ("W", "F") or \
-                    0x1F300 <= o <= 0x1FAFF or 0x2600 <= o <= 0x27BF or \
-                    0x1F000 <= o <= 0x1F2FF:
-                cw = 2
             else:
-                cw = 1
+                # Unicode's own width, and nothing else. Whole code-point
+                # RANGES used to be forced to 2 — 0x1F300-0x1FAFF and
+                # friends — but plenty of characters in them are
+                # east_asian_width N and a terminal draws them in one cell:
+                # 🖌 U+1F58C, ✔ U+2714, ⚠ U+26A0 among them. Every such
+                # character shifted the rest of its line one cell left of
+                # where the width calculation thought it was, which showed up
+                # as unpainted gaps at the right edge of a filled block and
+                # text landing in the wrong column.
+                cw = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
             _CELLS[ch] = cw
         w += cw
+        prev = ch
     return w
 PAIRS = {31: 1, 32: 2, 33: 3, 34: 4, 35: 5, 36: 6, 37: 7, 90: 8, 94: 9,
          # Panel pairs: every foreground above, again on a filled background,

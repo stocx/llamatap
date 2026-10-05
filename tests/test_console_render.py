@@ -2458,6 +2458,29 @@ class InFlightHoldsItsPlace(TapTest):
                           "a placeholder with no request in flight")
         self.assertEqual(c._live_lines, 0)
 
+    def test_a_tool_call_being_written_is_visible(self):
+        """A tool call streams as argument fragments, which neither `content`
+        nor `reasoning_content` ever carries. Without them the console showed
+        NOTHING for the whole time a model spent writing a file, while the
+        harness showed the code arriving."""
+        c = self.console({"model": "qwen", "req_bytes": 100,
+                          "state": "decoding", "tool": "write",
+                          "args": '{"path":"a.py","content":"def f():'})
+        rows = self.rows(c)
+        self.assertTrue(any("tool call [write]" in l for l in rows),
+                        "the tool call in progress is invisible")
+        self.assertTrue(any("def f():" in l for l in rows),
+                        "the arguments being written are not shown")
+
+    def test_partial_arguments_are_shown_as_text_not_parsed(self):
+        """Mid-stream they are not valid JSON; parsing would fail on every
+        frame until the last."""
+        c = self.console({"model": "qwen", "req_bytes": 100,
+                          "state": "decoding", "tool": "edit",
+                          "args": '{"oldText":"a","newT'})
+        self.assertTrue(any("oldText" in l for l in self.rows(c)),
+                        "a half-written call rendered as nothing")
+
     def test_the_spinner_advances(self):
         job = {"model": "qwen", "req_bytes": 100, "state": "prefill"}
         c = self.console(job)
@@ -3765,3 +3788,64 @@ class ClearSaysWhatItDid(TapTest):
         c = self.console([])
         c.cmd_clear()
         self.assertIn("in flight", c.msg, f"got: {c.msg!r}")
+
+
+class EmojiWidthFollowsUnicode(TapTest):
+    """Whole code-point ranges used to be forced to two cells.
+
+    Plenty of characters in them are east_asian_width N and a terminal draws
+    them in ONE cell. Every such character shifted the rest of its line a cell
+    left of where the width calculation thought it was — which showed as
+    unpainted gaps at the right edge of a filled block, and text landing in
+    the wrong column. Seen on a tool call writing Tkinter code full of
+    `text="🖌 Draw Mode"`.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def test_narrow_pictographs_are_one_cell(self):
+        for ch, name in (("\U0001f58c", "paintbrush"), ("✔", "tick"),
+                         ("⚠", "warning")):
+            with self.subTest(name=name):
+                self.assertEqual(self.C.dwidth(ch), 1,
+                                 f"{name} is east_asian_width N; a terminal "
+                                 f"draws it in one cell")
+
+    def test_wide_emoji_are_still_two_cells(self):
+        for ch, name in (("\U0001f600", "grinning"), ("✅", "check"),
+                         ("\U0001f4c1", "folder")):
+            with self.subTest(name=name):
+                self.assertEqual(self.C.dwidth(ch), 2, name)
+
+    def test_cjk_is_still_two_cells(self):
+        self.assertEqual(self.C.dwidth("漢"), 2)
+
+    def test_a_variation_selector_widens_its_character(self):
+        """VS16 asks for emoji presentation, so the pair takes two cells and
+        the selector itself none."""
+        self.assertEqual(self.C.dwidth("✔"), 1)
+        self.assertEqual(self.C.dwidth("✔️"), 2)
+
+    def test_a_selector_after_a_wide_character_adds_nothing(self):
+        self.assertEqual(self.C.dwidth("✅️"), 2)
+
+    def test_combining_marks_are_still_zero(self):
+        self.assertEqual(self.C.dwidth("é"), 1)
+
+    def test_a_panel_row_with_a_narrow_pictograph_fills_exactly(self):
+        """The observable consequence: the fill reaches the right edge."""
+        import re as _re
+        C = self.C
+        line = 'ttk.Button(text="\U0001f58c Draw Mode")'
+        row = C.on_panel("\033[37m" + line, 60)
+        plain = _re.sub(r"\033\[[0-9;]*m", "", row)
+        self.assertEqual(C.dwidth(plain), 60,
+                         "the padded row is not the width it claims")
+        spans = C.clamp_spans(C.ansi_lines(row)[0], 60)
+        end = max(c + C.dwidth(t) for c, t, _ in spans)
+        self.assertEqual(end, 60, "the row stops short of the panel edge")
+
+    def test_ascii_is_unaffected(self):
+        self.assertEqual(self.C.dwidth("plain ascii"), len("plain ascii"))
