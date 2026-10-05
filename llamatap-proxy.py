@@ -45,6 +45,42 @@ _active = {}
 _active_lock = threading.Lock()
 
 
+#: The parsed request bodies of whatever is in flight, written ONCE per
+#: request rather than per token.
+#:
+#: The small in-flight file is rewritten on every token, so putting a 23 KB
+#: system prompt in it would re-serialise that prompt hundreds of times per
+#: reply. Kept beside it instead, the console can show WHAT was asked while
+#: the model answers — without which you watch a reply to a question you
+#: cannot read, which is the thing a spinner alone never fixed.
+INFLIGHT_REQ = INFLIGHT.replace(".json", "-req.json")
+_reqs = {}
+
+
+def _publish_reqs():
+    try:
+        tmp = INFLIGHT_REQ + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(_reqs, f)
+        os.replace(tmp, INFLIGHT_REQ)
+    except Exception:
+        pass
+
+
+def inflight_req(key, body):
+    """Record the parsed request for `key`. Once, at the start."""
+    try:
+        parsed = json.loads(body) if body else None
+    except Exception:
+        parsed = None
+    if parsed is None:
+        return
+    with _active_lock:
+        _reqs[key] = parsed
+    _publish_reqs()
+
+
 def _publish():
     try:
         tmp = INFLIGHT + ".tmp"
@@ -53,7 +89,9 @@ def _publish():
         # a request that is still running from one whose proxy died. Without
         # it a killed proxy leaves its last entry in the file for ever and the
         # console shows a spinner that will never stop.
-        out = [dict(j, pid=os.getpid()) for j in _active.values()]
+        # The key travels with the entry so a reader can pair it with the
+        # request body published alongside.
+        out = [dict(j, pid=os.getpid(), key=k) for k, j in _active.items()]
         with os.fdopen(fd, "w") as f:
             json.dump(out, f)
         os.replace(tmp, INFLIGHT)      # atomic: a reader never sees half a file
@@ -70,7 +108,9 @@ def inflight_set(key, **kw):
 def inflight_clear(key):
     with _active_lock:
         _active.pop(key, None)
+        _reqs.pop(key, None)
         _publish()
+    _publish_reqs()
 PORT = int(os.environ.get("LLAMATAP_PORT", "9293"))
 
 
@@ -376,6 +416,7 @@ class Tap(http.server.BaseHTTPRequestHandler):
             pass
         inflight_set(key, t0=t0, model=model, path=self.path,
                      state="prefill", tokens=0, req_bytes=len(body or b""))
+        inflight_req(key, body)
         try:
             resp = urllib.request.urlopen(req, timeout=600)
             status, rhdrs = resp.status, resp.headers
@@ -883,10 +924,12 @@ if __name__ == "__main__":
     print(f"log: {LOGFILE}", flush=True)
     print("     nothing prints here — watch it live with `llamatap console`", flush=True)
     print("     ctrl-c to stop", flush=True)
-    try:
-        os.remove(INFLIGHT)        # a crash can leave a stale marker behind
-    except Exception:
-        pass
+    # A crash can leave stale markers behind; both go.
+    for stale in (INFLIGHT, INFLIGHT_REQ):
+        try:
+            os.remove(stale)
+        except Exception:
+            pass
     before = _count_records()
     try:
         srv.serve_forever()

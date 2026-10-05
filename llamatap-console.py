@@ -738,6 +738,21 @@ def clipboard(text):
     return None
 
 
+#: The parsed request bodies of whatever is in flight, published once each by
+#: the proxy beside the small per-token entry.
+INFLIGHT_REQ = INFLIGHT.replace(".json", "-req.json")
+
+
+def read_inflight_reqs():
+    """{key: parsed request} for requests still in flight."""
+    try:
+        with open(INFLIGHT_REQ) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
 def _alive(pid):
     """Is that process still running? Exact, not a timeout."""
     if not isinstance(pid, int) or pid <= 0:
@@ -1567,7 +1582,11 @@ class Console:
         # written, so the view must go to the true bottom rather than to the
         # last completed exchange's header.
         live_from = len(self.lines)
-        hname = parties.get("harness") or "harness"
+        # The detected name, then the one the user set with --name, then the
+        # generic word. On the FIRST request of a session no record exists
+        # yet, so detection has nothing to work from and the in-flight rows
+        # would say "harness" when the name is already known.
+        hname = parties.get("harness") or self.name or "harness"
         # Nothing is suppressed by COMPARING TEXT here, and deliberately so.
         # The proxy clears the in-flight entry before it writes the record —
         # see the `finally` in llamatap-proxy — so the normal path produces a
@@ -1597,15 +1616,33 @@ class Console:
             nb = job.get("req_bytes") or 0
             state = job.get("state") or "sending"
             waited = f"{nb:,} bytes · {state}"
-            # "sending": what is known is that bytes have gone out and no
-            # reply has come back. The contents are not in the in-flight
-            # entry, so claiming anything more would be invention.
+            # What was ASKED, while it is being answered. A placeholder alone
+            # reserved the position but carried no content, so you still
+            # watched the model deliberate over a question you could not
+            # read — the disorder was never the row, it was the prompt.
+            req = (getattr(self, "inflight_reqs", None) or {}).get(
+                job.get("key") or "")
+            note, asked = waited, ""
+            if isinstance(req, dict):
+                pre, turns = T.normalise(req)
+                n = len(pre) + sum(len(json.dumps(t))
+                                   for t in (req.get("tools") or []))
+                note = f"{n:,} chars · ~{n // 4:,} tokens · {state}"
+                if turns:
+                    asked = turns[-1].get("text") or ""
+            # Attributed to the HARNESS, whatever the last turn's role says.
+            # The harness demonstrably sent these bytes; whether they came
+            # from you or from a side-call of its own is decided
+            # structurally, and that needs the whole thread — which is not
+            # knowable until the record lands. Rendering a title generator's
+            # prompt as something YOU typed is the one mistake worth
+            # avoiding here, so nothing is attributed until it can be.
             lbl = f"{' ' * LEFT}{hname} → sending {sp}"
-            gap = " " * max(2, W - dwidth(lbl) - dwidth(waited) - 3)
-            self.emit(f"{C_DIM}{lbl}{C_OFF}{gap}{C_DIM}{waited}{C_OFF}")
-            # The placeholder is its own block and gets the gap every other
-            # block has. Without it the model's live rows ran straight into
-            # the request row above them.
+            gap = " " * max(2, W - dwidth(lbl) - dwidth(note) - 3)
+            self.emit(f"{C_DIM}{lbl}{C_OFF}{gap}{C_DIM}{note}{C_OFF}")
+            if asked:
+                self.block(asked, C_DIM, LEFT, max(24, W2 - 2),
+                           text_col=C_BODY)
             self.emit("")
 
             think, text = job.get("thinking") or "", job.get("text") or ""
@@ -3015,6 +3052,7 @@ class Console:
                 self.tick += 1
                 prev = [(j.get("text"), j.get("thinking")) for j in self.inflight]
                 self.inflight = read_inflight()
+                self.inflight_reqs = read_inflight_reqs()
                 cur = [(j.get("text"), j.get("thinking")) for j in self.inflight]
                 # The streamed text changes several times a second, so
                 # rebuilding on every change would eat the event loop and make

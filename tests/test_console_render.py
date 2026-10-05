@@ -3376,3 +3376,176 @@ class ToolCallsDedupeByMeaning(TapTest):
         """A model can emit malformed JSON; that must not raise, and must not
         collapse two different malformed calls into one."""
         self.assertEqual(len(self.calls("not json at all")), 2)
+
+
+class TheQuestionIsVisibleWhileAnswered(TapTest):
+    """While the model streams, you must be able to read what it was asked.
+
+    A spinner placeholder reserved the position but carried no content, so you
+    watched the model deliberate over a prompt you could not see — most
+    visibly on a title generator, which arrives with its own system prompt and
+    a question nothing on screen had asked. The disorder was never the row; it
+    was the prompt.
+
+    The proxy publishes the parsed request ONCE per request, beside the small
+    entry it rewrites per token, so a 23 KB system prompt is not re-serialised
+    hundreds of times per reply.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    REQ = {"model": "qwen", "messages": [
+        {"role": "system", "content": "<task>\nGenerate a title.\n</task>"},
+        {"role": "user",
+         "content": "Generate a title for this conversation:\nwrite code"}]}
+
+    def console(self, reqs=None, job=None):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 116)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = []
+        c.name = "opencode"; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": False, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = [job or {"key": "k1", "model": "qwen", "req_bytes": 2096,
+                              "state": "decoding", "thinking": "weighing it"}]
+        c.inflight_reqs = reqs if reqs is not None else {"k1": self.REQ}
+        c.msg = ""; c.msg_until = 0; c.tick = 0; c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        return c
+
+    def rows(self, c):
+        return ["".join(ch for _, ch, _ in s).rstrip() for s in c.lines]
+
+    def test_the_prompt_is_on_screen_while_the_model_answers(self):
+        rows = self.rows(self.console())
+        self.assertTrue(any("Generate a title for this conversation" in l
+                            for l in rows),
+                        "the question is still invisible while it is answered")
+
+    def test_the_prompt_comes_before_the_reply(self):
+        rows = self.rows(self.console())
+        q = next(i for i, l in enumerate(rows) if "Generate a title" in l)
+        a = next(i for i, l in enumerate(rows) if "weighing it" in l)
+        self.assertLess(q, a, "the answer is drawn above the question")
+
+    def test_it_is_not_attributed_to_the_user(self):
+        """A title generator's prompt rendered as something YOU typed is the
+        one mistake worth avoiding here. Whether a request is a side-call is
+        decided structurally and needs the whole thread, which is not knowable
+        until the record lands — so nothing is attributed until it can be."""
+        rows = self.rows(self.console())
+        i = next(i for i, l in enumerate(rows) if "Generate a title" in l)
+        header = [l for l in rows[:i] if l.strip()][-1]
+        self.assertIn("opencode", header,
+                      f"the harness's own prompt is attributed elsewhere: "
+                      f"{header!r}")
+        self.assertNotRegex(header, r"^\s*you\b",
+                            "claimed the user typed it")
+
+    def test_the_size_is_reported(self):
+        rows = self.rows(self.console())
+        head = next(l for l in rows if "sending" in l)
+        self.assertRegex(head, r"\d+ chars", f"got: {head!r}")
+        self.assertIn("decoding", head, "the state is not shown")
+
+    def test_without_a_published_request_it_still_renders(self):
+        """An older proxy publishes no request file; the placeholder must
+        degrade to what it always showed rather than vanish."""
+        rows = self.rows(self.console(reqs={}))
+        self.assertTrue(any("sending" in l for l in rows),
+                        "the placeholder disappeared without a request")
+        self.assertTrue(any("weighing it" in l for l in rows),
+                        "the live reply disappeared too")
+
+    def test_a_request_with_no_turns_does_not_raise(self):
+        c = self.console(reqs={"k1": {"model": "q", "messages": [
+            {"role": "system", "content": "only a system prompt"}]}})
+        self.assertTrue(any("sending" in l for l in self.rows(c)))
+
+    def test_the_reader_tolerates_a_missing_or_broken_file(self):
+        C = self.C
+        with open(C.INFLIGHT_REQ, "w") as f:
+            f.write("{ not json")
+        self.assertEqual(C.read_inflight_reqs(), {})
+        os.remove(C.INFLIGHT_REQ)
+        self.assertEqual(C.read_inflight_reqs(), {})
+
+    def test_the_request_file_sits_beside_the_entry_file(self):
+        self.assertNotEqual(self.C.INFLIGHT_REQ, self.C.INFLIGHT)
+        self.assertTrue(self.C.INFLIGHT_REQ.endswith("-req.json"))
+
+    # ---- the proxy end, which the tests above bypassed entirely ----
+    def test_the_proxy_publishes_the_request_and_its_key(self):
+        """These tests injected `inflight_reqs` directly, so three mutations
+        to the publishing end went unnoticed: not writing the file, not
+        reading it, and not putting the key on the entry that pairs with it."""
+        P = load("proxy")
+        C = self.C
+        key = "test-key-1"
+        body = json.dumps({"model": "qwen", "messages": [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "the question"}]}).encode()
+        try:
+            P.inflight_set(key, t0=0, model="qwen", path="/v1/chat/completions",
+                           state="prefill", tokens=0, req_bytes=len(body))
+            P.inflight_req(key, body)
+
+            entries = C.read_inflight()
+            self.assertTrue(entries, "nothing was published")
+            self.assertEqual(entries[0].get("key"), key,
+                             "the entry carries no key to pair with")
+
+            reqs = C.read_inflight_reqs()
+            self.assertIn(key, reqs, "the request body was not published")
+            self.assertEqual(
+                reqs[key]["messages"][-1]["content"], "the question")
+        finally:
+            P.inflight_clear(key)
+
+    def test_clearing_removes_both(self):
+        P = load("proxy")
+        C = self.C
+        key = "test-key-2"
+        P.inflight_set(key, t0=0, model="q", path="/x", state="prefill")
+        P.inflight_req(key, json.dumps({"model": "q", "messages": []}).encode())
+        P.inflight_clear(key)
+        self.assertEqual([e for e in C.read_inflight()
+                          if e.get("key") == key], [])
+        self.assertNotIn(key, C.read_inflight_reqs(),
+                         "a finished request's body is still published")
+
+    def test_an_unparseable_body_is_not_published(self):
+        P = load("proxy")
+        C = self.C
+        key = "test-key-3"
+        try:
+            P.inflight_set(key, t0=0, model="q", path="/x", state="prefill")
+            P.inflight_req(key, b"not json")
+            self.assertNotIn(key, C.read_inflight_reqs())
+        finally:
+            P.inflight_clear(key)
+
+    def test_the_handler_publishes_the_request_when_it_starts_one(self):
+        """The tests above call `inflight_req` directly, so deleting its CALL
+        SITE in the request handler changed nothing they could see. Asserted
+        at the source, like the clear-before-record ordering: an integration
+        test through MockUpstream would be better, and this at least fails
+        when the call goes away."""
+        src = open(os.path.join(ROOT, "llamatap-proxy.py")).read()
+        i = src.index("inflight_set(key, t0=t0")
+        window = src[i:i + 400]
+        self.assertIn("inflight_req(key, body)", window,
+                      "the handler no longer publishes the request body, so "
+                      "the console cannot show what was asked")
