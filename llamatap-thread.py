@@ -79,6 +79,7 @@ REC = os.environ.get("LLAMATAP_REC", os.path.join(_STATE, "llamatap-records.json
 SIGNATURES = [
     ("opencode", "opencode"), ("Claude Code", "Claude Code"), ("claude code", "Claude Code"),
     ("You are Pi", "Pi"), ("pi-coding-agent", "Pi"), ("Cline", "Cline"),
+    ("You are Crush", "Crush"), ("Crush", "Crush"),
     ("Roo", "Roo Code"), ("aider", "Aider"), ("Codex CLI", "Codex"),
     ("codex", "Codex"), ("Zed", "Zed"), ("Goose", "Goose"),
 ]
@@ -1071,6 +1072,20 @@ def conversation(recs, name_hint=None, show_repeats=False):
         elif not h.get("background"):
             harness = short
         t = rec.get("t", "")
+        # Traffic that is not a conversation. A harness that discovers models
+        # on startup — crush does, with `discover_models` — sends
+        # GET /v1/models with an empty body, which rendered as a setup block
+        # of NOTHING: a blank "prompting" row claiming the harness had said
+        # something. It is still shown, as the one line it is, because a
+        # record that disappears with no explanation is the defect this tool
+        # exists to prevent.
+        path_ = rec.get("path") or ""
+        if path_ and "completions" not in path_:
+            msgs.append({"t": t, "rec": ri, "name": harness or short,
+                         "who": "harness", "kind": "probe", "text": "",
+                         "path": path_, "status": rec.get("status"),
+                         "chars": 0, "repeat": False})
+            continue
         meta = rec.get("meta") or {}
         tmg = meta.get("timings") or {}
         if meta.get("injected"):
@@ -1127,6 +1142,21 @@ def conversation(recs, name_hint=None, show_repeats=False):
             last_setup = sig
 
         _, turns = normalise(rec.get("req"))
+        # Context the HARNESS injected as if it were you.
+        #
+        # crush sends `<system_reminder>This is a reminder that your todo list
+        # is…` with role "user", immediately before your actual message. The
+        # role says user and the person never typed a word of it, so reporting
+        # it as yours puts words in your mouth — the failure this project
+        # cares about most.
+        #
+        # The tell is structural, not the tag: two user turns in a row with no
+        # reply between them. One request is one turn, so a person cannot
+        # produce that; a harness prepending context can and does. The LAST of
+        # a run is the person's, everything before it is the harness.
+        for i in range(len(turns) - 1):
+            if turns[i].get("who") == "you" and turns[i + 1].get("who") == "you":
+                turns[i] = dict(turns[i], who="harness", kind="injected")
         turns = turns + from_response(rec.get("resp"))
         # Decode is one continuous run at a near-constant rate, so a turn's
         # share of the output tokens gives its share of the time. Marked `~`

@@ -3612,3 +3612,94 @@ class TheQuestionIsVisibleWhileAnswered(TapTest):
         self.assertIn("inflight_req(key, body)", window,
                       "the handler no longer publishes the request body, so "
                       "the console cannot show what was asked")
+
+
+class CrushShapedTraffic(TapTest):
+    """Three defects from crush's first run, all from assumptions nothing had
+    tested against a third harness."""
+
+    def setUp(self):
+        super().setUp()
+        self.T = load("thread")
+
+    def rec(self, msgs, path="/v1/chat/completions", reply="Hello!"):
+        return {"t": "2026-10-04T21:41:00", "status": 200, "path": path,
+                "req": {"model": "q", "messages": msgs} if msgs else {},
+                "resp": json.dumps({"choices": [{"message": {"content": reply},
+                                                 "finish_reason": "stop"}],
+                                    "usage": {"prompt_tokens": 9,
+                                              "completion_tokens": 2}}),
+                "meta": {"elapsed_ms": 20}}
+
+    CRUSH = [{"role": "system",
+              "content": "You are Crush, a powerful AI Assistant in the CLI."},
+             {"role": "user",
+              "content": "<system_reminder>your todo list is empty"
+                         "</system_reminder>"},
+             {"role": "user", "content": "hello"}]
+
+    def test_crush_is_named(self):
+        self.assertEqual(self.T.detect(self.CRUSH[0]["content"]), "Crush")
+
+    def test_a_models_probe_is_not_a_turn(self):
+        """`discover_models` sends GET /v1/models with an empty body, which
+        rendered as a setup block of nothing — a blank prompting row claiming
+        the harness had said something."""
+        msgs = self.T.conversation(
+            [self.rec(None, path="/v1/models"), self.rec(self.CRUSH)],
+            None, False)
+        setups = [m for m in msgs if m.get("kind") == "setup"]
+        self.assertEqual(len(setups), 1,
+                         f"the models probe became a turn: {setups}")
+        self.assertGreater(setups[0]["chars"], 0, "a blank setup block")
+        # Shown, but as what it is. A record that disappears with no
+        # explanation is the defect this tool exists to prevent, so the
+        # probe becomes one line rather than nothing.
+        probes = [m for m in msgs if m.get("kind") == "probe"]
+        self.assertEqual(len(probes), 1, "the probe vanished entirely")
+        self.assertEqual(probes[0]["path"], "/v1/models")
+
+    def test_injected_context_is_not_attributed_to_the_user(self):
+        msgs = self.T.conversation([self.rec(self.CRUSH)], None, False)
+        inj = [m for m in msgs if "system_reminder" in (m.get("text") or "")]
+        self.assertTrue(inj, "the injected turn vanished")
+        self.assertEqual(inj[0]["who"], "harness",
+                         "the harness's own injection is reported as yours")
+        self.assertEqual(inj[0]["kind"], "injected")
+
+    def test_your_own_message_is_still_yours(self):
+        msgs = self.T.conversation([self.rec(self.CRUSH)], None, False)
+        mine = [m for m in msgs if (m.get("text") or "").strip() == "hello"]
+        self.assertTrue(mine, "the user's message vanished")
+        self.assertEqual(mine[0]["who"], "you",
+                         "the user's own message was reassigned")
+
+    def test_a_lone_user_message_is_never_reassigned(self):
+        """Only a RUN of user turns means injection. One is just you."""
+        msgs = self.T.conversation([self.rec(
+            [{"role": "system", "content": "s"},
+             {"role": "user", "content": "just me"}])], None, False)
+        mine = [m for m in msgs if m.get("text") == "just me"]
+        self.assertEqual(mine[0]["who"], "you")
+
+    def test_only_the_last_of_a_run_is_yours(self):
+        msgs = self.T.conversation([self.rec(
+            [{"role": "system", "content": "s"},
+             {"role": "user", "content": "ctx one"},
+             {"role": "user", "content": "ctx two"},
+             {"role": "user", "content": "mine"}])], None, False)
+        by = {m.get("text"): m["who"] for m in msgs}
+        self.assertEqual(by.get("ctx one"), "harness")
+        self.assertEqual(by.get("ctx two"), "harness")
+        self.assertEqual(by.get("mine"), "you")
+
+    def test_a_user_turn_after_a_reply_is_still_yours(self):
+        """Separated by an assistant turn, so not a run."""
+        msgs = self.T.conversation([self.rec(
+            [{"role": "system", "content": "s"},
+             {"role": "user", "content": "first"},
+             {"role": "assistant", "content": "ok"},
+             {"role": "user", "content": "second"}])], None, False)
+        by = {m.get("text"): m["who"] for m in msgs}
+        self.assertEqual(by.get("first"), "you")
+        self.assertEqual(by.get("second"), "you")

@@ -1307,6 +1307,13 @@ class Console:
                 col = "\033[33m"
             elif kind == "background":
                 who = m.get("name")
+            elif kind == "probe":
+                # One dim line: what was asked for, and what came back. Not a
+                # conversation turn, but not invisible either.
+                who = f"{m.get('name')} → {m.get('path')}"
+            elif kind == "injected":
+                # Named so it is plainly not yours, and plainly not a reply.
+                who = f"{m.get('name')} → context"
             elif kind == "error":
                 # Named like every other thing a party does — `→ thinking`,
                 # `→ tool result`. The block keeps the SERVER's colour rather
