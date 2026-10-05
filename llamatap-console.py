@@ -258,6 +258,23 @@ def _norm_key(k):
     return re.sub(r"[^a-z0-9]", "", (k or "").lower())
 
 
+def path_arg(args):
+    """The argument naming a file, whatever the harness calls it.
+
+    filePath, file_path, path — matched on shape, like edit_pairs().
+    """
+    for k, v in args.items():
+        if isinstance(v, str) and "path" in _norm_key(k):
+            return v
+    return None
+
+
+def body_arg(args):
+    """The one multi-line argument: a write's content, whatever its name."""
+    big = [v for v in args.values() if isinstance(v, str) and "\n" in v]
+    return big[0] if len(big) == 1 else None
+
+
 def edit_pairs(args):
     """[(old_key, new_key)] for arguments that are two halves of an edit.
 
@@ -279,7 +296,94 @@ def edit_pairs(args):
     return out
 
 
-def unified(old, new, context=2):
+#: A line of a harness's numbered file listing: "  21: text". The number is
+#: the point — a read result that carries them tells us where in the file the
+#: text lives, which is the one thing an edit's payload never says.
+_NUMBERED = re.compile(r"^\s*(\d+):\s?(.*)$")
+
+
+def numbered_block(text):
+    """The longest run of consecutively numbered lines in `text`.
+
+    A run rather than "every line", because a harness wraps its listing in
+    something — `<content>` tags here — and those lines are not numbered. A
+    run is a shape; the wrapper is vocabulary, and only the shape is relied
+    on.
+    """
+    best, run = [], []
+    for ln in (text or "").split("\n"):
+        m = _NUMBERED.match(ln)
+        if m and (not run or int(m.group(1)) == run[-1][0] + 1):
+            run.append((int(m.group(1)), m.group(2)))
+            continue
+        if len(run) > len(best):
+            best = run
+        run = [(int(m.group(1)), m.group(2))] if m else []
+    return run if len(run) > len(best) else best
+
+
+def _lines(text):
+    """Split, dropping the empty tail a trailing newline leaves behind."""
+    out = (text or "").split("\n")
+    while out and out[-1] == "":
+        out.pop()
+    return out
+
+
+class FileView:
+    """What each file looked like, reconstructed from the wire alone.
+
+    An edit's payload is a fragment and its replacement — never a line number
+    and never the file. The harness knows the numbers because it opens the
+    file itself, which is local I/O and does not cross the tap. But the files
+    it READS and WRITES go to the model as tool traffic, so the content does
+    cross, and the thread holds enough to say where a fragment sits.
+
+    Reconstructed rather than read off disk on purpose: a recording replayed
+    next month must show what was true then, not what the file says now.
+    """
+
+    def __init__(self):
+        self.f = {}                      # path -> (first line number, lines)
+
+    def wrote(self, path, content):
+        if path:
+            self.f[path] = (1, _lines(content))
+
+    def read(self, path, body):
+        rows = numbered_block(body)
+        if path and len(rows) > 1:
+            self.f[path] = (rows[0][0], [t for _n, t in rows])
+
+    def at(self, path, fragment):
+        """1-based line number where `fragment` starts, or None if unknown.
+
+        None is a real answer: a file the thread never saw has no line
+        numbers, and inventing them is the failure this whole exercise is
+        about avoiding.
+        """
+        got = self.f.get(path)
+        frag = _lines(fragment)
+        if not got or not frag:
+            return None
+        base, lines = got
+        for i in range(len(lines) - len(frag) + 1):
+            if lines[i:i + len(frag)] == frag:
+                return base + i
+        return None
+
+    def edited(self, path, old, new):
+        """Apply an edit, so the NEXT edit to the same file is still located."""
+        at = self.at(path, old)
+        if at is None:
+            return
+        base, lines = self.f[path]
+        i = at - base
+        frag = _lines(old)
+        self.f[path] = (base, lines[:i] + _lines(new) + lines[i + len(frag):])
+
+
+def unified(old, new, context=2, start=1):
     """A diff of two strings as (line number, marker, text) rows.
 
     Both halves of an edit are on the wire, so what changed is observable and
@@ -297,6 +401,12 @@ def unified(old, new, context=2):
     a = (old or "").split("\n")
     b = (new or "").split("\n")
     ops = difflib.SequenceMatcher(None, a, b).get_opcodes()
+    # `start=None` means the file was never seen on the wire, so no absolute
+    # number is knowable and none is shown. Numbering the FRAGMENT from 1
+    # would look absolute and be wrong, which is worse than a blank gutter.
+    def num(i):
+        return None if start is None else start + i
+
     if all(tag == "equal" for tag, *_ in ops):
         # Nothing changed. Returning context rows would show a "diff" whose
         # every line is unchanged, which says the opposite of the truth.
@@ -304,8 +414,8 @@ def unified(old, new, context=2):
     rows = []
     for n, (tag, i1, i2, j1, j2) in enumerate(ops):
         if tag != "equal":
-            rows += [(k + 1, "-", a[k]) for k in range(i1, i2)]
-            rows += [(k + 1, "+", b[k]) for k in range(j1, j2)]
+            rows += [(num(k), "-", a[k]) for k in range(i1, i2)]
+            rows += [(num(k), "+", b[k]) for k in range(j1, j2)]
             continue
         # Indices are ABSOLUTE into b throughout. Mixing absolute and
         # relative here is what put a line 8 on screen numbered 15.
@@ -313,11 +423,11 @@ def unified(old, new, context=2):
         head = 0 if n == 0 else min(context, run)
         tail = 0 if n == len(ops) - 1 else min(context, run - head)
         if head + tail >= run:
-            rows += [(j + 1, " ", b[j]) for j in range(j1, j2)]
+            rows += [(num(j), " ", b[j]) for j in range(j1, j2)]
             continue
-        rows += [(j + 1, " ", b[j]) for j in range(j1, j1 + head)]
+        rows += [(num(j), " ", b[j]) for j in range(j1, j1 + head)]
         rows.append((None, "@", f"… {run - head - tail:,} unchanged lines"))
-        rows += [(j + 1, " ", b[j]) for j in range(j2 - tail, j2)]
+        rows += [(num(j), " ", b[j]) for j in range(j2 - tail, j2)]
     return rows
 
 
@@ -1015,6 +1125,10 @@ class Console:
         self._conv_w = max(8, min(cols - 1, cols - self.rail_w() - 2))
         self._dash_rec, self._dash_bg = None, False
         self._rec_name = {}
+        # Rebuilt from scratch every time, because it is a function of the
+        # thread so far and the thread can be filtered or replayed.
+        self._files = FileView()
+        pending_read = None
         W = self._conv_w
         self._fetch_flags()
         msgs = T.conversation(self.recs, self.name, self.opts.get("repeats", False))
@@ -1085,6 +1199,14 @@ class Console:
             # The header-row filter. Applied here, AFTER bg_by_rec and the
             # dashboard record were derived above from every message, so
             # hiding a party changes what you read and never what is counted.
+            # A read's RESULT carries the file, numbered, so it is where the
+            # absolute line numbers come from. Updated before the filter, so
+            # hiding a party changes what you read and never what is known —
+            # the same rule the dashboard follows.
+            if m.get("kind") == "tool result" and pending_read:
+                self._files.read(pending_read, m.get("text") or "")
+                pending_read = None
+
             party = self.party_of(m)
             if party is not None and party not in self.show:
                 continue
@@ -1323,9 +1445,17 @@ class Console:
                     # model's JSON in insertion order meant write() showed
                     # `content` before `filePath` in one call and after it in
                     # the next, so the same tool never looked the same twice.
+                    fpath = path_arg(args)
+                    pairs = edit_pairs(args)
+                    if not pairs:
+                        # a write, or a read whose result is still to come
+                        content = body_arg(args)
+                        if content is not None:
+                            self._files.wrote(fpath, content)
+                        elif fpath:
+                            pending_read = fpath
                     # Two halves of an edit become one diff instead of two
                     # blobs you would have to compare by eye.
-                    pairs = edit_pairs(args)
                     paired = {k for p in pairs for k in p}
                     flat, long_ = [], []
                     for k in sorted(args):
@@ -1348,7 +1478,9 @@ class Console:
                     self._bar = col
                     rec_i = m.get("rec", 0)
                     for ok, nk in pairs:
-                        rows = unified(args[ok], args[nk])
+                        at = self._files.at(fpath, args[ok])
+                        rows = unified(args[ok], args[nk], start=at)
+                        self._files.edited(fpath, args[ok], args[nk])
                         key = f"{mi}:{ok}"
                         self.node_bodies[("diff", key)] = rows or ["(no change)"]
                         nid = (rec_i, "diff", key)

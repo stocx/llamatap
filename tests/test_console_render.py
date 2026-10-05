@@ -3025,14 +3025,17 @@ class EditsRenderAsDiffs(TapTest):
         self.assertTrue(any("+" in l and "return 2" in l for l in rows),
                         "the added line is missing")
 
-    def test_each_rendered_row_shows_its_line_number(self):
+    def test_an_unseen_file_gets_no_line_numbers(self):
+        """The file was never read or written in this thread, so where the
+        fragment sits is unknowable. A blank gutter is the honest answer;
+        numbering the FRAGMENT from 1 would look absolute and be wrong."""
         rows = [l for l in self.rows(self.console(self.EDIT))
                 if "return" in l]
         self.assertTrue(rows, "no diff rows rendered")
         for row in rows:
             with self.subTest(row=row):
-                self.assertRegex(row, r"\s2\s+[-+]\s",
-                                 f"no line number in the gutter: {row!r}")
+                self.assertNotRegex(row, r"\d+\s+[-+]\s",
+                                    f"invented a line number: {row!r}")
 
     def test_the_change_is_marked_by_background_not_by_text_colour(self):
         """Tinted text is easy to miss on one short line among many, and
@@ -3111,3 +3114,151 @@ class EditsRenderAsDiffs(TapTest):
         """Only edits have two halves; a write has one."""
         c = self.console({"filePath": "/tmp/x", "content": "a\nb"})
         self.assertNotIn("diff", [nid[1] for (_l, _a, _b, nid) in c.hotspots])
+
+
+def a_write_then_edit(path="/tmp/m.py", head=20):
+    """A thread that writes a file and then edits it.
+
+    The write puts the content on the wire, so the edit's fragment can be
+    located in it and numbered absolutely — which is the whole point.
+    """
+    import json as _j
+    body = "\n".join([f"# filler {i}" for i in range(1, head + 1)]
+                      + ["def f():", "    return 1", ""])
+    w = a_tool_call(0, {"filePath": path, "content": body})
+    _r = _j.loads(w["resp"])
+    _r["choices"][0]["message"]["tool_calls"][0]["function"]["name"] = "write"
+    w["resp"] = _j.dumps(_r)
+    e = a_tool_call(1, {"filePath": path,
+                        "oldString": "def f():\n    return 1\n",
+                        "newString": "def f():\n    return 2\n"})
+    _r = _j.loads(e["resp"])
+    _r["choices"][0]["message"]["tool_calls"][0]["function"]["name"] = "edit"
+    e["resp"] = _j.dumps(_r)
+    return [w, e]
+
+
+class DiffLineNumbersAreAbsolute(TapTest):
+    """An edit's payload is a fragment and its replacement — never a line
+    number, never the file. The harness knows the numbers because it opens the
+    file itself, which is local I/O and does not cross the tap.
+
+    But the files it READS and WRITES go to the model as tool traffic, so the
+    thread holds enough to say where a fragment sits. Reconstructed rather
+    than read off disk on purpose: a recording replayed next month must show
+    what was true then.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def console(self, recs):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (60, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = recs
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.msg = ""; c.msg_until = 0; c.tick = 0
+        c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        return c
+
+    def rows(self, c):
+        return ["".join(ch for _, ch, _ in s).rstrip() for s in c.lines]
+
+    def diff_rows(self, c):
+        """Only the rows under the diff node.
+
+        The write that precedes the edit renders its content too, and that
+        content contains the same text — so searching the whole buffer found
+        the WRITE's copy and reported no line number on it.
+        """
+        rows = self.rows(c)
+        i = next(i for i, l in enumerate(rows) if "diff" in l and "lines" in l)
+        out = []
+        for l in rows[i + 1:]:
+            if not l.strip():
+                break
+            out.append(l)
+        return out
+
+    def test_a_written_file_gives_the_edit_real_numbers(self):
+        c = self.console(a_write_then_edit(head=20))
+        hit = [l for l in self.diff_rows(c) if "return 1" in l]
+        self.assertTrue(hit, "the diff did not render")
+        # 20 filler lines, then `def f():` at 21 and `return 1` at 22
+        self.assertRegex(hit[0], r"\s22\s+-\s",
+                         f"wrong or missing line number: {hit[0]!r}")
+
+    def test_the_number_follows_where_the_fragment_actually_is(self):
+        for head in (0, 5, 100):
+            with self.subTest(head=head):
+                c = self.console(a_write_then_edit(head=head))
+                hit = next(l for l in self.diff_rows(c) if "return 1" in l)
+                self.assertRegex(hit, rf"\s{head + 2}\s+-\s",
+                                 f"head={head}: {hit!r}")
+
+    def test_the_context_row_is_numbered_too(self):
+        c = self.console(a_write_then_edit(head=20))
+        hit = next(l for l in self.diff_rows(c) if "def f():" in l)
+        self.assertRegex(hit, r"\s21\s", f"context row unnumbered: {hit!r}")
+
+    # ---- the pieces, directly ----
+    def test_a_numbered_listing_is_recognised_inside_a_wrapper(self):
+        """A harness wraps its listing in something; the run of numbered
+        lines is the shape, the wrapper is vocabulary."""
+        body = ("<path>/tmp/x.py</path>\n<type>file</type>\n<content>\n"
+                "1: import re\n2: \n3: def f():\n</content>")
+        self.assertEqual(self.C.numbered_block(body),
+                         [(1, "import re"), (2, ""), (3, "def f():")])
+
+    def test_a_listing_that_does_not_start_at_one_keeps_its_offset(self):
+        body = "21: def g():\n22:     return 2"
+        v = self.C.FileView()
+        v.read("/tmp/x.py", body)
+        self.assertEqual(v.at("/tmp/x.py", "    return 2"), 22)
+
+    def test_unnumbered_output_is_not_mistaken_for_a_listing(self):
+        self.assertEqual(self.C.numbered_block("Wrote file successfully."), [])
+        self.assertEqual(self.C.numbered_block(""), [])
+
+    def test_a_file_never_seen_has_no_position(self):
+        self.assertIsNone(self.C.FileView().at("/tmp/x.py", "anything"))
+
+    def test_a_fragment_that_is_not_in_the_file_has_no_position(self):
+        v = self.C.FileView()
+        v.wrote("/tmp/x.py", "a\nb\nc")
+        self.assertIsNone(v.at("/tmp/x.py", "nowhere"))
+
+    def test_an_edit_updates_the_view_for_the_next_edit(self):
+        """Two edits to one file: the second must still be locatable, and at
+        a position the first edit may have moved."""
+        v = self.C.FileView()
+        v.wrote("/tmp/x.py", "a\nb\nc\nd")
+        v.edited("/tmp/x.py", "b", "B1\nB2")
+        self.assertEqual(v.at("/tmp/x.py", "c"), 4,
+                         "the second fragment was not re-located after an "
+                         "edit changed the line count above it")
+
+    def test_an_edit_to_an_unknown_file_is_harmless(self):
+        v = self.C.FileView()
+        v.edited("/tmp/x.py", "a", "b")      # must not raise
+        self.assertIsNone(v.at("/tmp/x.py", "b"))
+
+    def test_the_path_argument_is_found_by_shape(self):
+        for k in ("filePath", "file_path", "path", "targetPath"):
+            with self.subTest(k=k):
+                self.assertEqual(self.C.path_arg({k: "/tmp/x", "n": 1}),
+                                 "/tmp/x")

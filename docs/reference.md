@@ -327,6 +327,26 @@ inside the same collapsible node every other long argument gets:
   ▌      6       pattern = r"^[\+]?[(]?[0-9]{1,4}..."
 ```
 
+**The line numbers are the file's, not the fragment's.** An edit's payload is
+an excerpt and its replacement — never a line number, and never the file. The
+harness knows where the excerpt sits because it opens the file itself, and
+that is local I/O between the harness and your disk: it never crosses the tap,
+so llamatap cannot see it.
+
+What does cross the tap is every file the harness READS or WRITES, because
+those go to the model as tool traffic. So the thread is reconstructed as it
+plays — a write sets a file's contents, a numbered read listing reveals them,
+an edit applies itself — and the excerpt is then located in what the file is
+known to contain.
+
+Reconstructed rather than read off disk on purpose: a recording replayed next
+month must show what was true when it was made, not what the file says now.
+That is also why it is a better number than the harness's own, which is only
+true at the moment it was drawn.
+
+**A file the thread never saw gets no numbers at all.** Numbering the excerpt
+from 1 would look absolute and be wrong, which is worse than a blank gutter.
+
 **The colour is the background, not the text.** Tinted text is easy to miss on
 one short line among many, and illegible once a line wraps and only part of it
 carries the colour. **Every row is numbered**, because "which line" is most of
