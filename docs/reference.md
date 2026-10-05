@@ -362,6 +362,13 @@ whose name starts with "old" pairs with the one whose name is the same with
 names to maintain — the same reason `sections()` reads headings rather than a
 list of phrases.
 
+**Nesting varies more than spelling does**, so the search goes to any depth:
+
+    opencode   {"filePath": …, "oldString": …,  "newString": …}
+    pi         {"path": …, "edits": [{"oldText": …, "newText": …}]}
+
+A call carrying several edits renders several diffs.
+
 The diff is derived rather than observed, which is safe here only because
 `/raw` still shows the strings exactly as they crossed the wire. A wrong diff
 costs legibility, never accuracy.

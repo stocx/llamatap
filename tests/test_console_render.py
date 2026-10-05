@@ -2917,6 +2917,10 @@ class EditsRenderAsDiffs(TapTest):
         self.C = load("console")
 
     # ---- pairing, by shape rather than by one harness's spelling ----
+    def pairs(self, args):
+        got, _used = self.C.edit_pairs(args)
+        return got
+
     def test_every_common_spelling_pairs(self):
         for old, new in (("oldString", "newString"),
                          ("old_string", "new_string"),
@@ -2924,22 +2928,53 @@ class EditsRenderAsDiffs(TapTest):
                          ("old", "new"),
                          ("OldText", "NewText")):
             with self.subTest(old=old):
-                got = self.C.edit_pairs({old: "a", new: "b", "filePath": "/x"})
-                self.assertEqual(got, [(old, new)])
+                self.assertEqual(
+                    self.pairs({old: "a", new: "b", "filePath": "/x"}),
+                    [("a", "b")])
+
+    def test_a_nested_list_of_edits_pairs(self):
+        """pi sends the halves inside one argument rather than as two:
+
+            opencode  {"filePath": …, "oldString": …,  "newString": …}
+            pi        {"path": …, "edits": [{"oldText": …, "newText": …}]}
+
+        Looking only at the top level matched the first and fell through to
+        raw JSON for the second.
+        """
+        got, used = self.C.edit_pairs(
+            {"path": "/x", "edits": [{"oldText": "a", "newText": "b"}]})
+        self.assertEqual(got, [("a", "b")])
+        self.assertIn("edits", used, "the raw argument is still shown as well")
+
+    def test_several_nested_edits_all_pair(self):
+        got = self.pairs({"path": "/x", "edits": [
+            {"oldText": "a", "newText": "A"},
+            {"oldText": "b", "newText": "B"}]})
+        self.assertEqual(got, [("a", "A"), ("b", "B")])
+
+    def test_a_single_nested_object_pairs(self):
+        self.assertEqual(
+            self.pairs({"path": "/x", "edit": {"old": "a", "new": "b"}}),
+            [("a", "b")])
 
     def test_an_old_with_no_twin_is_not_paired(self):
-        self.assertEqual(self.C.edit_pairs({"oldString": "a"}), [])
+        self.assertEqual(self.pairs({"oldString": "a"}), [])
 
     def test_a_new_with_no_twin_is_not_paired(self):
-        self.assertEqual(self.C.edit_pairs({"newString": "b"}), [])
+        self.assertEqual(self.pairs({"newString": "b"}), [])
 
     def test_non_string_values_are_not_paired(self):
         """A diff of a number is meaningless and would crash the splitter."""
-        self.assertEqual(self.C.edit_pairs({"oldCount": 1, "newCount": 2}), [])
+        self.assertEqual(self.pairs({"oldCount": 1, "newCount": 2}), [])
 
     def test_unrelated_arguments_are_left_alone(self):
-        self.assertEqual(
-            self.C.edit_pairs({"command": "ls", "filePath": "/x"}), [])
+        self.assertEqual(self.pairs({"command": "ls", "filePath": "/x"}), [])
+
+    def test_an_unrelated_nested_argument_is_not_consumed(self):
+        """Only an argument that CONTAINED a pair is replaced by the diff."""
+        got, used = self.C.edit_pairs({"path": "/x", "opts": {"dry_run": True}})
+        self.assertEqual(got, [])
+        self.assertEqual(used, set())
 
     # ---- the diff itself ----
     def test_a_change_shows_both_sides(self):
@@ -3262,3 +3297,82 @@ class DiffLineNumbersAreAbsolute(TapTest):
             with self.subTest(k=k):
                 self.assertEqual(self.C.path_arg({k: "/tmp/x", "n": 1}),
                                  "/tmp/x")
+
+
+class ToolCallsDedupeByMeaning(TapTest):
+    """A tool call is identified by what it means, not by its bytes.
+
+    The copy in a response and the copy a harness echoes back in the next
+    request's history are the same call, but need not be the same string. pi
+    emits `{"oldText": "x"}` and re-serialises it as `{"oldText":"x"}` — three
+    characters shorter — so comparing raw text failed to match them and every
+    pi tool call was drawn twice: once with the response's token count, again
+    with a character estimate.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.T = load("thread")
+
+    def thread(self, echoed):
+        """Two requests: the model calls a tool, the harness echoes it back
+        in the next request's history using `echoed` as the argument text."""
+        spaced = '{"path": "x.py", "edits": [{"oldText": "a", "newText": "b"}]}'
+        call = {"id": "c1", "type": "function",
+                "function": {"name": "edit", "arguments": spaced}}
+        sysmsg = {"role": "system", "content": "# Agent\nbe terse"}
+        first = {
+            "t": "2026-10-04T21:00:00", "status": 200,
+            "path": "/v1/chat/completions",
+            "req": {"model": "qwen", "messages": [
+                sysmsg, {"role": "user", "content": "change it"}]},
+            "resp": json.dumps({"choices": [{"message": {
+                "content": "", "tool_calls": [call]},
+                "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 9}}),
+            "meta": {"elapsed_ms": 40}}
+        second = {
+            "t": "2026-10-04T21:00:05", "status": 200,
+            "path": "/v1/chat/completions",
+            "req": {"model": "qwen", "messages": [
+                sysmsg, {"role": "user", "content": "change it"},
+                {"role": "assistant", "content": "",
+                 "tool_calls": [{"id": "c1", "type": "function",
+                                 "function": {"name": "edit",
+                                              "arguments": echoed}}]},
+                {"role": "tool", "tool_call_id": "c1",
+                 "content": "Successfully replaced 1 block(s)."}]},
+            "resp": json.dumps({"choices": [{"message": {"content": "done"},
+                                             "finish_reason": "stop"}],
+                                "usage": {"prompt_tokens": 20,
+                                          "completion_tokens": 2}}),
+            "meta": {"elapsed_ms": 30}}
+        return [first, second]
+
+    def calls(self, echoed):
+        msgs = self.T.conversation(self.thread(echoed), None, False)
+        return [m for m in msgs if m.get("kind") == "tool call"]
+
+    def test_the_same_call_reserialised_is_one_call(self):
+        compact = '{"path":"x.py","edits":[{"oldText":"a","newText":"b"}]}'
+        self.assertEqual(len(self.calls(compact)), 1,
+                         "the echoed copy was drawn as a second call")
+
+    def test_key_order_does_not_make_a_second_call(self):
+        reordered = '{"edits": [{"newText": "b", "oldText": "a"}], "path": "x.py"}'
+        self.assertEqual(len(self.calls(reordered)), 1)
+
+    def test_an_identical_echo_is_still_one_call(self):
+        same = '{"path": "x.py", "edits": [{"oldText": "a", "newText": "b"}]}'
+        self.assertEqual(len(self.calls(same)), 1)
+
+    def test_a_genuinely_different_call_is_two(self):
+        """Dedup must not swallow a second, real edit to the same file."""
+        other = '{"path":"x.py","edits":[{"oldText":"c","newText":"d"}]}'
+        self.assertEqual(len(self.calls(other)), 2,
+                         "a different edit was mistaken for a repeat")
+
+    def test_unparseable_arguments_fall_back_to_the_raw_text(self):
+        """A model can emit malformed JSON; that must not raise, and must not
+        collapse two different malformed calls into one."""
+        self.assertEqual(len(self.calls("not json at all")), 2)

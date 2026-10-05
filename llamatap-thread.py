@@ -1150,7 +1150,22 @@ def conversation(recs, name_hint=None, show_repeats=False):
 
         for i, turn in enumerate(turns):
             text = turn.get("text") or ""
-            key = (turn["who"], turn.get("kind"), turn.get("tool"), text)
+            # A tool call is identified by what it MEANS, not by its bytes.
+            # The copy in the response and the copy a harness echoes back in
+            # the next request's history are the same call, but need not be
+            # the same string: pi emits `{"oldText": "x"}` and re-serialises
+            # it as `{"oldText":"x"}`, three characters shorter. Comparing raw
+            # text therefore failed to match them and every pi tool call was
+            # drawn twice — once with the response's token count and again
+            # with a character estimate.
+            ident = text
+            if turn.get("kind") == "tool call":
+                try:
+                    ident = json.dumps(json.loads(text), sort_keys=True,
+                                       separators=(",", ":"))
+                except Exception:
+                    ident = text
+            key = (turn["who"], turn.get("kind"), turn.get("tool"), ident)
             # Every request re-sends the whole history, so showing repeats
             # renders the entire conversation again on each turn — a
             # 25-exchange session draws itself 25 times. Hidden by default,

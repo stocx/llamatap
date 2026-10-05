@@ -275,25 +275,62 @@ def body_arg(args):
     return big[0] if len(big) == 1 else None
 
 
+def _pairs_in(obj):
+    """[(old, new)] for every old/new twin anywhere inside `obj`."""
+    out = []
+    if isinstance(obj, dict):
+        norm = {_norm_key(k): k for k in obj}
+        for n, k in sorted(norm.items()):
+            if not n.startswith("old"):
+                continue
+            twin = norm.get("new" + n[3:])
+            if twin and isinstance(obj[k], str) and isinstance(obj[twin], str):
+                out.append((obj[k], obj[twin]))
+        for v in obj.values():
+            if isinstance(v, (dict, list)):
+                out += _pairs_in(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            out += _pairs_in(v)
+    return out
+
+
 def edit_pairs(args):
-    """[(old_key, new_key)] for arguments that are two halves of an edit.
+    """([(old, new)], keys those pairs came from).
 
     Found by SHAPE, not by one harness's spelling: any key whose normalised
-    name starts with "old" pairs with the key whose name is the same with
-    "old" replaced by "new". That covers oldString/newString,
-    old_string/new_string, old_str/new_str and plain old/new without a table
-    of names to keep up to date — the same reason sections() reads headings
-    rather than a list of phrases.
+    name starts with "old" pairs with the key that is the same with "new" in
+    its place. That covers oldString/newString, old_string/new_string,
+    old_str/new_str and plain old/new without a table of names to maintain.
+
+    NESTED as well as top level, because the shape varies more than the
+    spelling does. opencode sends the halves as two top-level arguments; pi
+    sends a list of them under one:
+
+        opencode  {"filePath": …, "oldString": …,  "newString": …}
+        pi        {"path": …, "edits": [{"oldText": …, "newText": …}]}
+
+    Looking only at the top level matched the first and silently fell through
+    to raw JSON for the second — the harness-specific assumption this project
+    keeps having to root out.
     """
+    pairs, used = [], set()
     norm = {_norm_key(k): k for k in args}
-    out = []
     for n, k in sorted(norm.items()):
         if not n.startswith("old"):
             continue
         twin = norm.get("new" + n[3:])
         if twin and isinstance(args[k], str) and isinstance(args[twin], str):
-            out.append((k, twin))
-    return out
+            pairs.append((args[k], args[twin]))
+            used |= {k, twin}
+    for k, v in args.items():
+        if k in used or not isinstance(v, (dict, list)):
+            continue
+        nested = _pairs_in(v)
+        if nested:
+            pairs += nested
+            used.add(k)
+    return pairs, used
 
 
 #: A line of a harness's numbered file listing: "  21: text". The number is
@@ -1446,7 +1483,7 @@ class Console:
                     # `content` before `filePath` in one call and after it in
                     # the next, so the same tool never looked the same twice.
                     fpath = path_arg(args)
-                    pairs = edit_pairs(args)
+                    pairs, paired = edit_pairs(args)
                     if not pairs:
                         # a write, or a read whose result is still to come
                         content = body_arg(args)
@@ -1456,7 +1493,6 @@ class Console:
                             pending_read = fpath
                     # Two halves of an edit become one diff instead of two
                     # blobs you would have to compare by eye.
-                    paired = {k for p in pairs for k in p}
                     flat, long_ = [], []
                     for k in sorted(args):
                         if k in paired:
@@ -1477,11 +1513,11 @@ class Console:
                     # until you choose to fold it.
                     self._bar = col
                     rec_i = m.get("rec", 0)
-                    for ok, nk in pairs:
-                        at = self._files.at(fpath, args[ok])
-                        rows = unified(args[ok], args[nk], start=at)
-                        self._files.edited(fpath, args[ok], args[nk])
-                        key = f"{mi}:{ok}"
+                    for pi_, (old_s, new_s) in enumerate(pairs):
+                        at = self._files.at(fpath, old_s)
+                        rows = unified(old_s, new_s, start=at)
+                        self._files.edited(fpath, old_s, new_s)
+                        key = f"{mi}:{pi_}"
                         self.node_bodies[("diff", key)] = rows or ["(no change)"]
                         nid = (rec_i, "diff", key)
                         if nid not in self.touched:
