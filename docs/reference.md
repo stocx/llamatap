@@ -309,6 +309,24 @@ rectangle, dashboard included, not the logical buffer.
 `runs/llamatap-<stamp>/` and prints the command to read it back. `serve` does
 the same on every start, so you never have to remember to.
 
+### Edits are shown as diffs
+
+An `edit` call carries both halves on the wire, so what changed is observable
+and does not have to be read out of two blobs by eye. They render as one
+unified diff — added green, removed red — inside the same collapsible node
+every other long argument gets.
+
+The two halves are found by SHAPE, not by one harness's spelling: any argument
+whose name starts with "old" pairs with the one whose name is the same with
+"new" in its place. That covers `oldString`/`newString`, `old_string`/
+`new_string`, `old_str`/`new_str` and plain `old`/`new` without a table of
+names to maintain — the same reason `sections()` reads headings rather than a
+list of phrases.
+
+The diff is derived rather than observed, which is safe here only because
+`/raw` still shows the strings exactly as they crossed the wire. A wrong diff
+costs legibility, never accuracy.
+
 ### Repeats
 
 Every request re-sends the whole conversation, so most of what arrives has been

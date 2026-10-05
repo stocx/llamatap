@@ -19,7 +19,7 @@ attributes, so every front end shows the same thread. The DASHBOARD is drawn
 here instead of being reused, because a box-drawn panel is console chrome and
 makes no sense in a pipeable text dump.
 """
-import curses, importlib.util, io, json, os, re, shlex, subprocess, sys, threading, time, unicodedata
+import curses, difflib, importlib.util, io, json, os, re, shlex, subprocess, sys, threading, time, unicodedata
 from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -242,6 +242,47 @@ def clock(ts):
     except ValueError:
         return hhmm
     return f"{(h % 12) or 12}:{mm}{'am' if h < 12 else 'pm'}"
+
+
+def _norm_key(k):
+    return re.sub(r"[^a-z0-9]", "", (k or "").lower())
+
+
+def edit_pairs(args):
+    """[(old_key, new_key)] for arguments that are two halves of an edit.
+
+    Found by SHAPE, not by one harness's spelling: any key whose normalised
+    name starts with "old" pairs with the key whose name is the same with
+    "old" replaced by "new". That covers oldString/newString,
+    old_string/new_string, old_str/new_str and plain old/new without a table
+    of names to keep up to date — the same reason sections() reads headings
+    rather than a list of phrases.
+    """
+    norm = {_norm_key(k): k for k in args}
+    out = []
+    for n, k in sorted(norm.items()):
+        if not n.startswith("old"):
+            continue
+        twin = norm.get("new" + n[3:])
+        if twin and isinstance(args[k], str) and isinstance(args[twin], str):
+            out.append((k, twin))
+    return out
+
+
+def unified(old, new, label="", context=2):
+    """A unified diff of two strings, as lines.
+
+    Both halves of an edit are on the wire, so what changed is observable and
+    does not have to be read out of two blobs by eye. The raw strings are
+    still exactly a `/raw` away, which is what makes showing a derived view
+    here safe: a wrong diff costs legibility, never accuracy.
+    """
+    a = (old or "").split("\n")
+    b = (new or "").split("\n")
+    rows = list(difflib.unified_diff(a, b, lineterm="", n=context,
+                                     fromfile=label, tofile=label))
+    # Drop the ---/+++ file headers: the path is already on the row above.
+    return [r for r in rows if not r.startswith(("---", "+++"))]
 
 
 def on_panel(text, width=0):
@@ -884,9 +925,26 @@ class Console:
             while body_lines and not body_lines[-1].strip():
                 body_lines.pop()
             for ln in body_lines:
-                for piece in self._wrap(ln, w, ind) or [ind]:
-                    self.emit(on_panel(f"{C_BODY}{piece}", avail)
-                              if bar else f"{C_BODY}{piece}{C_OFF}")
+                tc, mark = C_BODY, ""
+                if kind == "diff" and ln and ln[0] in "+-@ ":
+                    # Added green, removed red, hunk headers dim. Once a long
+                    # line wraps, the colour is the only thing left saying
+                    # which side it is on, so it is not decoration.
+                    tc = {"+": "\033[32m", "-": "\033[31m",
+                          "@": C_DIM}.get(ln[0], C_BODY)
+                    # The marker is split off so the REST keeps its own
+                    # leading whitespace. `_wrap` preserves indentation at the
+                    # start of a line, and a diff line starts with `+` or `-`,
+                    # so the code's indentation was collapsed — the exact
+                    # defect fixed for everything else in 27061ad.
+                    mark, ln = ln[0], ln[1:]
+                # The colour goes AFTER the indent, not before it: `ind`
+                # carries the accent bar and C_PANEL, and C_PANEL reset the
+                # foreground, so a prefix colour was overridden every time.
+                pre = ind + tc + mark
+                for piece in self._wrap(ln, w, pre) or [pre]:
+                    self.emit(on_panel(piece, avail)
+                              if bar else f"{piece}{C_OFF}")
         return nid
 
     def rebuild(self, *a, **kw):
@@ -1225,8 +1283,14 @@ class Console:
                     # model's JSON in insertion order meant write() showed
                     # `content` before `filePath` in one call and after it in
                     # the next, so the same tool never looked the same twice.
+                    # Two halves of an edit become one diff instead of two
+                    # blobs you would have to compare by eye.
+                    pairs = edit_pairs(args)
+                    paired = {k for p in pairs for k in p}
                     flat, long_ = [], []
                     for k in sorted(args):
+                        if k in paired:
+                            continue
                         v = args[k]
                         if isinstance(v, str) and "\n" in v:
                             long_.append((k, v))
@@ -1243,6 +1307,19 @@ class Console:
                     # until you choose to fold it.
                     self._bar = col
                     rec_i = m.get("rec", 0)
+                    for ok, nk in pairs:
+                        rows = unified(args[ok], args[nk])
+                        key = f"{mi}:{ok}"
+                        self.node_bodies[("diff", key)] = rows or ["(no change)"]
+                        nid = (rec_i, "diff", key)
+                        if nid not in self.touched:
+                            self.open.add(nid)
+                        adds = sum(1 for r in rows if r.startswith("+"))
+                        dels = sum(1 for r in rows if r.startswith("-"))
+                        self.emit_node(rec_i, self.recs[rec_i], None,
+                                       "diff", key, "diff",
+                                       f"+{adds:,} −{dels:,} lines", 1, True,
+                                       base=body_col)
                     for k, v in long_:
                         key = f"{mi}:{k}"
                         self.node_bodies[("toolarg", key)] = v.split("\n")

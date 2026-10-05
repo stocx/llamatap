@@ -2863,24 +2863,202 @@ class CopyWithEverythingHidden(TapTest):
         self.assertNotIn("hello", body)
         self.assertNotIn("reply 0", body)
 
+    def copy_note(self, show):
+        """Run /copy with a clipboard that always works, and return the note.
+
+        The first version of these tests called cmd_copy() directly, so they
+        depended on wl-copy or xclip EXISTING. They passed here and failed on
+        every CI runner, where the note is "no clipboard tool found" instead —
+        and the one that asserted an absence passed on CI for the wrong
+        reason, since that message lacks the words it was looking for too.
+        """
+        C = self.C
+        c = self.console(show)
+        real = C.clipboard
+        try:
+            C.clipboard = lambda text: "fake-clip"
+            c.cmd_copy([])
+        finally:
+            C.clipboard = real
+        return c.msg
+
     def test_the_copy_note_says_everything_was_hidden(self):
         """Asserting the ABSENCE of party names was blind: when the bug
         substituted the default, the note said nothing about filtering either,
         so both the right and wrong behaviour passed. It has to assert what
         the note positively says."""
-        c = self.console([])
-        c.cmd_copy([])
-        self.assertIn("every party hidden", c.msg,
-                      f"the copy note claims nothing was filtered: {c.msg!r}")
+        note = self.copy_note([])
+        self.assertIn("every party hidden", note,
+                      f"the copy note claims nothing was filtered: {note!r}")
 
     def test_a_partial_filter_names_the_parties_shown(self):
-        c = self.console(["you"])
-        c.cmd_copy([])
-        self.assertIn("you only", c.msg, f"got: {c.msg!r}")
+        note = self.copy_note(["you"])
+        self.assertIn("you only", note, f"got: {note!r}")
 
     def test_an_unfiltered_copy_note_mentions_no_filter(self):
-        c = self.console(self.C.PARTIES)
-        c.cmd_copy([])
+        note = self.copy_note(self.C.PARTIES)
+        self.assertIn("copied", note,
+                      f"the copy did not report success: {note!r}")
         for word in ("only", "hidden"):
-            self.assertNotIn(word, c.msg,
-                             f"an unfiltered copy claims a filter: {c.msg!r}")
+            self.assertNotIn(word, note,
+                             f"an unfiltered copy claims a filter: {note!r}")
+
+
+class EditsRenderAsDiffs(TapTest):
+    """Both halves of an edit are on the wire, so what changed is observable.
+
+    They used to render as two separate blobs you had to compare by eye. The
+    raw strings stay exactly a `/raw` away, which is what makes a derived view
+    safe here: a wrong diff costs legibility, never accuracy.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    # ---- pairing, by shape rather than by one harness's spelling ----
+    def test_every_common_spelling_pairs(self):
+        for old, new in (("oldString", "newString"),
+                         ("old_string", "new_string"),
+                         ("old_str", "new_str"),
+                         ("old", "new"),
+                         ("OldText", "NewText")):
+            with self.subTest(old=old):
+                got = self.C.edit_pairs({old: "a", new: "b", "filePath": "/x"})
+                self.assertEqual(got, [(old, new)])
+
+    def test_an_old_with_no_twin_is_not_paired(self):
+        self.assertEqual(self.C.edit_pairs({"oldString": "a"}), [])
+
+    def test_a_new_with_no_twin_is_not_paired(self):
+        self.assertEqual(self.C.edit_pairs({"newString": "b"}), [])
+
+    def test_non_string_values_are_not_paired(self):
+        """A diff of a number is meaningless and would crash the splitter."""
+        self.assertEqual(self.C.edit_pairs({"oldCount": 1, "newCount": 2}), [])
+
+    def test_unrelated_arguments_are_left_alone(self):
+        self.assertEqual(
+            self.C.edit_pairs({"command": "ls", "filePath": "/x"}), [])
+
+    # ---- the diff itself ----
+    def test_a_change_shows_both_sides(self):
+        rows = self.C.unified("a\nb\nc", "a\nB\nc")
+        self.assertTrue(any(r == "-b" for r in rows), rows)
+        self.assertTrue(any(r == "+B" for r in rows), rows)
+
+    def test_file_headers_are_dropped(self):
+        """The path is already on the row above; repeating it twice as
+        ---/+++ is noise."""
+        for r in self.C.unified("a", "b"):
+            self.assertFalse(r.startswith(("---", "+++")), r)
+
+    def test_identical_sides_produce_nothing(self):
+        self.assertEqual(self.C.unified("same", "same"), [])
+
+    def test_an_insert_into_nothing_works(self):
+        rows = self.C.unified("", "added")
+        self.assertTrue(any(r.startswith("+") for r in rows), rows)
+
+    # ---- rendering ----
+    def console(self, args, rawjson=False):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_tool_call(0, args)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": rawjson, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.msg = ""; c.msg_until = 0; c.tick = 0
+        c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        return c
+
+    EDIT = {"filePath": "/tmp/x.py",
+            "oldString": "def f():\n    return 1\n", 
+            "newString": "def f():\n    return 2\n"}
+
+    def rows(self, c):
+        return ["".join(ch for _, ch, _ in s).rstrip() for s in c.lines]
+
+    def test_an_edit_renders_one_diff_not_two_blobs(self):
+        c = self.console(self.EDIT)
+        kinds = [nid[1] for (_l, _a, _b, nid) in c.hotspots]
+        self.assertIn("diff", kinds, "no diff node for an edit")
+        self.assertNotIn("toolarg", kinds,
+                         "the two halves are still separate blobs as well")
+
+    def test_the_diff_shows_what_changed(self):
+        rows = self.rows(self.console(self.EDIT))
+        self.assertTrue(any("-" in l and "return 1" in l for l in rows),
+                        "the removed line is missing")
+        self.assertTrue(any("+" in l and "return 2" in l for l in rows),
+                        "the added line is missing")
+
+    def test_the_diff_keeps_the_code_s_indentation(self):
+        """`_wrap` preserves whitespace at the start of a line, and a diff
+        line starts with `+` or `-` — so without splitting the marker off
+        first, the indentation of the code itself collapsed. The same defect
+        27061ad fixed everywhere else, reappearing one layer in."""
+        rows = self.rows(self.console(self.EDIT))
+        for want in ("-    return 1", "+    return 2"):
+            with self.subTest(want=want):
+                self.assertTrue(
+                    any(want in l for l in rows),
+                    f"indentation lost: {[l for l in rows if 'return' in l]}")
+
+    def test_a_deeply_indented_change_keeps_every_level(self):
+        c = self.console({"filePath": "/tmp/x.py",
+                          "oldString": "if a:\n    if b:\n        x = 1\n",
+                          "newString": "if a:\n    if b:\n        x = 2\n"})
+        rows = self.rows(c)
+        self.assertTrue(any("-        x = 1" in l for l in rows),
+                        f"nesting collapsed: {[l for l in rows if 'x =' in l]}")
+
+    def test_the_node_states_the_size_of_the_change(self):
+        row = next(l for l in self.rows(self.console(self.EDIT))
+                   if "diff" in l)
+        self.assertRegex(row, r"\+\d+ −\d+ lines", f"got: {row!r}")
+
+    def test_the_path_is_still_shown_plainly(self):
+        self.assertTrue(any("filePath: /tmp/x.py" in l
+                            for l in self.rows(self.console(self.EDIT))),
+                        "the unpaired arguments stopped rendering")
+
+    def test_raw_mode_still_shows_the_strings(self):
+        """The escape hatch that makes a derived view safe."""
+        rows = self.rows(self.console(self.EDIT, rawjson=True))
+        self.assertTrue(any("oldString" in l for l in rows),
+                        "/raw no longer shows what crossed the wire")
+
+    def test_added_and_removed_lines_are_coloured_differently(self):
+        """Once a long line wraps, the colour is the only thing left saying
+        which side it is on."""
+        C = self.C
+        c = self.console(self.EDIT)
+        attr_of = {}
+        for spans in c.lines:
+            text = "".join(ch for _, ch, _ in spans)
+            for _col, chunk, attr in spans:
+                if "return 1" in chunk:
+                    attr_of["removed"] = attr
+                if "return 2" in chunk:
+                    attr_of["added"] = attr
+        self.assertIn("added", attr_of, "no added line on screen")
+        self.assertIn("removed", attr_of, "no removed line on screen")
+        self.assertNotEqual(attr_of["added"], attr_of["removed"],
+                            "added and removed lines look identical")
+
+    def test_a_write_is_not_turned_into_a_diff(self):
+        """Only edits have two halves; a write has one."""
+        c = self.console({"filePath": "/tmp/x", "content": "a\nb"})
+        self.assertNotIn("diff", [nid[1] for (_l, _a, _b, nid) in c.hotspots])
