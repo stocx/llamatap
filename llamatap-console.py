@@ -1660,20 +1660,30 @@ class Console:
             # puts your own "hello" in opencode's.
             side = bool(isinstance(req, dict) and last_pre is not None
                         and T.normalise(req)[0].strip() != last_pre)
-            lbl = f"{' ' * LEFT}{hname} → sending {sp}"
-            gap = " " * max(2, W - dwidth(lbl) - dwidth(note) - 3)
-            self.emit(f"{C_DIM}{lbl}{C_OFF}{gap}{C_DIM}{note}{C_OFF}")
-            for twho, text in asked:
-                if side:
-                    name, col_ = hname, "\033[36m"
-                else:
-                    name, col_ = {
-                        "you": ("you", "\033[32m"),
-                        "model": (mdl, "\033[33m"),
-                    }.get(twho, (f"{hname} → tool result", "\033[36m"))
-                self.emit(f"{col_}{' ' * LEFT}{name}{C_OFF}")
-                self.block(text, col_, LEFT, max(24, W2 - 2),
-                           text_col=C_BODY)
+            # One header, not two. `X → sending` above `X → tool result` said
+            # the same thing twice; the spinner and the request's size belong
+            # on the row that names the speaker. A bare "sending" row is kept
+            # only when there is nothing new to show — a prefill, or a request
+            # whose every turn the thread has already drawn.
+            rows_ = [(hname if side else {
+                          "you": "you", "model": mdl,
+                      }.get(twho, f"{hname} → tool result"),
+                      "\033[36m" if side else {
+                          "you": "\033[32m", "model": "\033[33m",
+                      }.get(twho, "\033[36m"),
+                      text)
+                     for twho, text in asked] or \
+                [(f"{hname} → sending", C_DIM, None)]
+            for k, (name, col_, text) in enumerate(rows_):
+                # The size and state sit on the FIRST row only; repeating
+                # them on each turn would claim each one cost that much.
+                stat = note if k == 0 else ""
+                lbl = f"{' ' * LEFT}{name} {sp}"
+                gap = " " * max(2, W - dwidth(lbl) - dwidth(stat) - 3)
+                self.emit(f"{col_}{lbl}{C_OFF}{gap}{C_DIM}{stat}{C_OFF}")
+                if text:
+                    self.block(text, col_, LEFT, max(24, W2 - 2),
+                               text_col=C_BODY)
             self.emit("")
 
             think, text = job.get("thinking") or "", job.get("text") or ""

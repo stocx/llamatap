@@ -3483,17 +3483,45 @@ class TheQuestionIsVisibleWhileAnswered(TapTest):
         c = self.console(reqs={"k1": quoting},
                          recs=[a_record(0, text="hello")])
         rows = self.rows(c)
-        live = rows[next(i for i, l in enumerate(rows) if "sending" in l):]
+        # Located by the in-flight STATE, not by the word "sending": that row
+        # only appears when there is nothing new to name, which is exactly
+        # the case this test does not exercise.
+        live = rows[next(i for i, l in enumerate(rows) if "decoding" in l):]
         self.assertTrue(any("Generate a title" in l for l in live),
                         "the actual instruction is missing")
         self.assertFalse(any(l.strip().endswith("hello") for l in live),
                          f"an already-shown turn was replayed: {live}")
 
     def test_the_size_is_reported(self):
-        rows = self.rows(self.console())
-        head = next(l for l in rows if "sending" in l)
+        head = next(l for l in self.rows(self.console()) if "decoding" in l)
         self.assertRegex(head, r"\d+ chars", f"got: {head!r}")
-        self.assertIn("decoding", head, "the state is not shown")
+
+    def test_one_header_per_turn_not_two(self):
+        """`X → sending` above `X → tool result` said the same thing twice."""
+        rows = [l for l in self.rows(self.console()) if l.strip()]
+        i = next(i for i, l in enumerate(rows) if "decoding" in l)
+        self.assertNotIn("sending", rows[i],
+                         "a bare sending row is still drawn above the turn")
+        self.assertIn("opencode", rows[i], f"got: {rows[i]!r}")
+
+    def test_a_bare_sending_row_when_there_is_nothing_new(self):
+        """Prefill, or a request whose every turn is already on screen."""
+        rows = self.rows(self.console(reqs={}))
+        self.assertTrue(any("sending" in l for l in rows),
+                        "nothing marks the request in flight")
+
+    def test_the_size_is_stated_once_not_per_turn(self):
+        """Repeating it on each turn would claim each one cost that much."""
+        two = {"model": "qwen", "messages": [
+            {"role": "system", "content": "<task>\nt\n</task>"},
+            {"role": "user", "content": "first new turn"},
+            {"role": "user", "content": "second new turn"}]}
+        # Counted by the in-flight STATE, which only the live rows carry —
+        # matching "chars ·" swept the completed record's rows in too.
+        rows = [l for l in self.rows(self.console(reqs={"k1": two}))
+                if "decoding" in l]
+        self.assertEqual(len(rows), 1,
+                         f"the request size is repeated: {rows}")
 
     def test_without_a_published_request_it_still_renders(self):
         """An older proxy publishes no request file; the placeholder must
