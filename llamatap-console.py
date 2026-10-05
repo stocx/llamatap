@@ -1694,6 +1694,17 @@ class Console:
             self.emit("")
 
             think, text = job.get("thinking") or "", job.get("text") or ""
+            # A tool call being written, argument fragment by argument
+            # fragment. Shown as the partial text it is: it is not valid JSON
+            # yet, so parsing it into a diff or a field list would fail on
+            # every frame until the last.
+            targs, tname = job.get("args") or "", job.get("tool") or ""
+            if targs:
+                self.emit(f"\033[33m{' ' * LEFT}{mdl} → tool call "
+                          f"[{tname or '…'}] {sp}{C_OFF}")
+                self.block(targs, "\033[33m", LEFT, max(24, W2 - 2),
+                           text_col=C_BODY)
+                self.emit("")
             if think and not text:
                 # "(thinking) (thinking)" — the word was in the f-string
                 # twice, once from the label and once hardcoded beside it.

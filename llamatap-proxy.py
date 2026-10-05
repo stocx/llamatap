@@ -572,6 +572,7 @@ class Tap(http.server.BaseHTTPRequestHandler):
             # the newest turn is invisible for as long as it takes to generate —
             # twenty seconds of nothing on a long reasoning reply.
             live_txt, live_think, sse_buf = "", "", ""
+            live_tool, live_args = "", ""
             while True:
                 # read1, not read. BufferedReader.read(n) blocks until it
                 # has n bytes or hits EOF, so with small SSE events the proxy
@@ -608,10 +609,24 @@ class Tap(http.server.BaseHTTPRequestHandler):
                             live_txt += dl["content"]
                         if dl.get("reasoning_content"):
                             live_think += dl["reasoning_content"]
+                        # A tool call streams as argument fragments, not as
+                        # content. Without this, a model writing a file
+                        # produced NOTHING live for the whole write — the
+                        # console sat silent while the harness showed the
+                        # code arriving, because the only two fields being
+                        # watched stay empty for the entire call.
+                        for tc in (dl.get("tool_calls") or []):
+                            fn = tc.get("function") or {}
+                            if fn.get("name"):
+                                live_tool = fn["name"]
+                            if fn.get("arguments"):
+                                live_args += fn["arguments"]
                 if time.time() - last_pub > 0.3:
                     last_pub = time.time()
                     inflight_set(key, tokens=ntok, state="decoding",
-                                 text=live_txt[-1200:], thinking=live_think[-1200:])
+                                 text=live_txt[-1200:],
+                                 thinking=live_think[-1200:],
+                                 tool=live_tool, args=live_args[-1200:])
                 if len(seen) < HEAD_CAP:
                     seen.extend(chunk)
                 else:
