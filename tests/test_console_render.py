@@ -144,11 +144,16 @@ class CellWidths(TapTest):
 
 #: every label the old three-panel dashboard showed, taken from dash() before
 #: the restyle. The restyle must not quietly drop one.
+# Every statistic the full panel must still carry. A restyle may move a
+# number or rename it; losing one is the thing this list exists to catch.
+# "Cache Reuse" became "KV cache hits" — the name llama.cpp uses for it — and
+# the session's per-metric averages became the same metrics as This turn,
+# measured over the session, so the two sections can be read against each
+# other.
 DASHBOARD_LABELS = [
     "Model", "Quantised", "Runtime", "Slots", "Sampling",
-    "Tools Offered", "Cache Reuse", "Prefill", "Decode",
-    "Context", "Requests", "Messages", "Tokens Generated",
-    "Decode Average", "Prefill Average", "Model Time",
+    "Tools Offered", "KV cache hits", "Prefill", "Decode",
+    "Context", "Requests", "Messages", "Model Time",
 ]
 SETTINGS_LABELS = [
     "GPU Layers", "Experts on CPU", "Context Window", "K Cache", "V Cache",
@@ -237,8 +242,18 @@ class StatsRail(TapTest):
 
     def test_the_rail_carries_its_documented_subset(self):
         text = self.rail_text(self.console(40, 160, stats="right"))
-        missing = [l for l in self.C.Console.RAIL_KEEP if l not in text]
-        self.assertEqual(missing, [], f"the rail dropped one of its own: {missing}")
+        # RAIL_KEEP is a FILTER, not a guarantee: "Thinking" exists only when
+        # the model thought, and a metric with no data has no row. What must
+        # hold is that the unconditional ones are present and nothing outside
+        # the list reaches the rail.
+        for want in ("Context", "KV cache hits", "Prefill", "Decode"):
+            with self.subTest(want=want):
+                self.assertIn(want, text, f"the rail dropped {want}")
+        for label in ("Messages", "Tools Offered", "Quantised", "Runtime"):
+            with self.subTest(label=label):
+                self.assertNotIn(label, text,
+                                 f"{label} is not in RAIL_KEEP but reached "
+                                 f"the rail")
 
     def test_the_rail_is_smaller_than_the_bottom_panel(self):
         """If the slim view is not slimmer, it has no reason to exist."""
@@ -761,7 +776,11 @@ class ReviewRegressions(TapTest):
         """Not a constant. A constant drifts the moment a label is added."""
         longest = max(len(x) for x in
                       list(self.C._LEFT_LABELS) + list(self.C._SESSION_LABELS))
-        self.assertGreaterEqual(longest, 16)
+        # Long enough that the width is doing real work. The floor was 16,
+        # which was the longest label of the day rather than a requirement;
+        # the labels are shorter now and the property under test is that the
+        # column follows them, not that any particular one exists.
+        self.assertGreaterEqual(longest, 10)
         c = self.console(cols=160, stats="bottom", flags=True)
         for spans, _ in c.dash(158):
             if not isinstance(spans, list) or len(spans) < 2:
@@ -3927,13 +3946,29 @@ class RailSectionsAreGrouped(TapTest):
         return w, ["".join(x for x, _ in t) if isinstance(t, list) else t
                    for t, _a in c.dash(w)]
 
-    def test_each_heading_has_a_rule(self):
+    def test_each_section_is_a_box(self):
+        """A rule under a heading was a half-measure: it separated the titles
+        from each other and left the numbers floating in one column. A border
+        says where a group starts and, more usefully, where it ends."""
         _w, rows = self.rail()
-        heads = [r for r in rows if r.startswith(("This turn", "Session"))]
-        self.assertTrue(heads, "no section headings at all")
-        for h in heads:
-            with self.subTest(h=h):
-                self.assertIn("─", h, f"no rule on the heading: {h!r}")
+        tops = [r for r in rows if r.startswith("╭")]
+        bottoms = [r for r in rows if r.startswith("╰")]
+        self.assertTrue(tops, "no boxed sections at all")
+        self.assertEqual(len(tops), len(bottoms),
+                         "a section is opened and never closed")
+        for t in tops:
+            with self.subTest(t=t):
+                self.assertRegex(t, r"╭─ \w.*─╮$", f"malformed top: {t!r}")
+
+    def test_every_row_of_a_box_is_the_same_width(self):
+        """A border that is a cell out reads as a broken box."""
+        for cols in (90, 118, 140, 200):
+            with self.subTest(cols=cols):
+                _w, rows = self.rail(cols)
+                widths = {self.C.dwidth(r) for r in rows
+                          if r.startswith(("╭", "│", "╰"))}
+                self.assertEqual(len(widths), 1,
+                                 f"box rows disagree on width: {widths}")
 
     def test_the_rule_never_overflows_the_rail(self):
         for cols in (90, 118, 140, 200):
@@ -3943,15 +3978,15 @@ class RailSectionsAreGrouped(TapTest):
                     self.assertLessEqual(self.C.dwidth(r), w,
                                          f"row wider than the rail: {r!r}")
 
-    def test_the_numbers_are_not_ruled(self):
-        """Only headings. A rule on a value row would read as a separator in
-        the middle of a group."""
+    def test_every_value_sits_inside_a_border(self):
         _w, rows = self.rail()
-        for r in rows:
-            if r.startswith(("This turn", "Session", "Model")):
-                continue
+        body = [r for r in rows if r.strip()
+                and not r.startswith(("╭", "╰"))]
+        self.assertTrue(body, "no values at all")
+        for r in body:
             with self.subTest(r=r):
-                self.assertNotIn("─", r, f"a value row carries a rule: {r!r}")
+                self.assertTrue(r.startswith("│") and r.endswith("│"),
+                                f"a value escaped its box: {r!r}")
 
     def test_each_party_carries_a_filter_mark(self):
         """The state is in the MARK, not only in the dimness — a
@@ -4060,3 +4095,193 @@ class RailSectionsAreGrouped(TapTest):
             with self.subTest(glyph=g):
                 self.assertEqual(self.C.dwidth(g), 1)
         self.assertNotEqual(self.C.FILTER_ON, self.C.FILTER_OFF)
+
+
+class BothPlacementsAgree(TapTest):
+    """The rail and the bottom panel show the same three groups. Calling them
+    different things in each made a reader learn the layout twice."""
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def panel(self, where, cols=170):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (50, cols)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(i) for i in range(3)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": where}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.inflight_reqs = {}
+        c.msg = ""; c.msg_until = 0; c.tick = 0; c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        w = c.rail_w() if where == "right" else cols - 2
+        return "\n".join("".join(x for x, _ in t) if isinstance(t, list) else t
+                         for t, _a in c.dash(w))
+
+    def test_both_name_the_sections_the_same_way(self):
+        for where in ("right", "bottom"):
+            with self.subTest(where=where):
+                text = self.panel(where)
+                for title in ("This turn", "Session"):
+                    self.assertIn(title, text,
+                                  f"{where} does not say {title!r}")
+
+    def test_the_old_titles_are_gone(self):
+        text = self.panel("bottom")
+        for old in ("Current Request", "Session Totals"):
+            self.assertNotIn(old, text, f"{old!r} survives in the bottom panel")
+
+    def test_the_cache_metric_is_named_for_what_it_is(self):
+        """llama.cpp calls it the KV cache; "Cache Reuse" named nothing in
+        particular."""
+        for where in ("right", "bottom"):
+            with self.subTest(where=where):
+                text = self.panel(where)
+                self.assertIn("KV cache hits", text)
+                self.assertNotIn("Cache Reuse", text)
+
+    def columns(self, text):
+        """The bottom panel's three columns, separately.
+
+        It is COLUMNAR — every row carries all three — so splitting the text
+        on a section name just finds the header and calls the rest one
+        column, which is what the first version of these tests did.
+        """
+        cols = {1: [], 2: [], 3: []}
+        for line in text.split("\n"):
+            if not line.startswith("│"):
+                continue
+            parts = line.split("│")
+            for i in (1, 2, 3):
+                if i < len(parts):
+                    cols[i].append(parts[i])
+        return {i: "\n".join(v) for i, v in cols.items()}
+
+    def test_both_sections_carry_the_same_measurements(self):
+        """A metric in one and not the other is one that genuinely does not
+        exist at that scale — not an oversight."""
+        cols = self.columns(self.panel("bottom"))
+        for shared in ("KV cache hits", "Prefill", "Decode"):
+            with self.subTest(shared=shared):
+                self.assertIn(shared, cols[2], f"This turn lost {shared}")
+                self.assertIn(shared, cols[3], f"Session lost {shared}")
+
+    def test_context_is_session_only(self):
+        """A turn does not have a context window; the thread does."""
+        cols = self.columns(self.panel("bottom"))
+        self.assertIn("Context", cols[3], "Session lost Context")
+        self.assertNotIn("Context", cols[2],
+                         "Context appeared under This turn, where it has no "
+                         "meaning")
+
+    def test_tools_offered_is_turn_only(self):
+        """What THIS request put on the table. A session total would hide a
+        harness that drops tools as the context fills."""
+        cols = self.columns(self.panel("bottom"))
+        self.assertIn("Tools Offered", cols[2])
+        self.assertNotIn("Tools Offered", cols[3])
+
+    def test_the_party_words_are_capitalised(self):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen()
+        c.chips = C.Console.build_chips(c, "opencode", "llama-server", "qwen")
+        self.assertEqual(c.chips[0][1], "You", "the user's own chip")
+
+    def test_the_session_cache_rate_is_over_the_whole_prompt(self):
+        """`prompt_n` is only the part that had to be EVALUATED. Dividing by
+        it gave 2,063% and a negative count of new tokens."""
+        C = self.C
+        recs = []
+        for i in range(2):
+            r = a_record(i)
+            r["meta"]["usage"] = {"prompt_tokens": 1000, "completion_tokens": 5}
+            r["meta"]["timings"] = dict(r["meta"]["timings"],
+                                        prompt_n=100, cache_n=900)
+            recs.append(r)
+
+        class Screen:
+            def getmaxyx(self):
+                return (50, 170)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = recs
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "bottom"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.inflight_reqs = {}
+        c.msg = ""; c.msg_until = 0; c.tick = 0; c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        text = "\n".join("".join(x for x, _ in t) if isinstance(t, list) else t
+                         for t, _a in c.dash(168))
+        col3 = self.columns(text)[3]
+        self.assertIn("90%", col3,
+                      f"1,800 of 2,000 reused is 90%: {col3}")
+        self.assertIn("1,800 reused, 200 new", col3)
+        self.assertNotIn("-", col3.split("reused")[0][-14:],
+                         "a negative count of new tokens")
+
+    def test_the_thinking_share_appears_when_the_model_thought(self):
+        """A thread whose window is 40% reasoning it has finished with is a
+        different thing from one that is 40% code."""
+        C = self.C
+        rec = a_record(0)
+        rec["resp"] = json.dumps({
+            "choices": [{"message": {"content": "done",
+                                     "reasoning_content": "weighing " * 200},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 4000, "completion_tokens": 400},
+            "timings": {"prompt_n": 10, "predicted_n": 400,
+                        "prompt_ms": 50.0, "predicted_ms": 900.0,
+                        "prompt_per_second": 200.0,
+                        "predicted_per_second": 83.3, "cache_n": 3000}})
+        rec["meta"]["usage"] = {"prompt_tokens": 4000, "completion_tokens": 400}
+
+        class Screen:
+            def getmaxyx(self):
+                return (50, 170)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [rec]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "bottom"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.inflight_reqs = {}
+        c.msg = ""; c.msg_until = 0; c.tick = 0; c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        text = "\n".join("".join(x for x, _ in t) if isinstance(t, list) else t
+                         for t, _a in c.dash(168))
+        col3 = self.columns(text)[3]
+        self.assertIn("Thinking", col3, "no thinking share at all")
+        self.assertIn("tokens in context", col3,
+                      "the share is stated without its basis")
+
+    def test_no_thinking_means_no_thinking_row(self):
+        """A 0% row would claim a measurement that was never taken."""
+        self.assertNotIn("Thinking", self.columns(self.panel("bottom"))[3])

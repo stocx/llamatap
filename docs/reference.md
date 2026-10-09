@@ -188,6 +188,21 @@ for those few seconds and work normally the moment the record arrives.
 
 ### The dashboard
 
+**This turn and Session carry the same measurements**, under the same names,
+so the two can be read against each other: KV cache hits, Prefill, Decode. A
+metric that appears in one and not the other is one that genuinely does not
+exist at that scale — Context and Requests belong to the thread, Tools Offered
+to the single request that put them on the table.
+
+**Thinking is shown as a share of the context**, because a window that is 40%
+reasoning the model has already finished with is a different thing from one
+that is 40% code, and nothing else on screen separates them. The thinking
+*level* is shown when a harness asks for one; none seen so far does.
+
+"KV cache hits" is llama.cpp's own name for the thing. Both the rail and the
+bottom panel use the same section names and the same labels, so the layout is
+learned once.
+
 Three panels, organised by **time scale**, so a reader can ask "is this a fact
 about the model, about this turn, or about the whole session?" and the column
 answers it.

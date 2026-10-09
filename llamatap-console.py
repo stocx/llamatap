@@ -519,10 +519,10 @@ def on_panel(text, width=0):
 BOTTOM_MIN = 30 * 3 + 2 + 4
 
 _LEFT_LABELS = ("Model", "Quantised", "Runtime", "Slots", "Sampling",
-                "Tools Offered", "Cache Reuse", "Prefill", "Decode",
+                "Tools Offered", "KV cache hits", "Prefill", "Decode",
                 "Generated", "Statistics", "Note")
-_SESSION_LABELS = ("Context", "Requests", "Messages", "Tokens Generated",
-                   "Decode Average", "Prefill Average", "Model Time")
+_SESSION_LABELS = ("Context", "Requests", "Messages", "KV cache hits",
+                   "Prefill", "Decode", "Generated", "Thinking", "Model Time")
 
 HELP = [
     # Keys only. The slash commands come from COMMANDS, which /help prints
@@ -1040,7 +1040,7 @@ class Console:
         a hand-placed label and a hand-placed hotspot always eventually do.
         """
         out, x = [], LEFT + dwidth(FILTER_LABEL) + 2
-        for party, label in (("you", "you"), ("harness", harness),
+        for party, label in (("you", "You"), ("harness", harness),
                              ("server", server), ("model", model)):
             # The mark is part of the click target: it is the affordance, so
             # clicking it has to do what it advertises.
@@ -1234,9 +1234,9 @@ class Console:
         # lines of the transcript: it used to scroll away, and the names are
         # now the filter control, so they have to stay reachable.
         self.chips = self.build_chips(
-            parties.get("harness") or "harness (not identified yet)",
+            parties.get("harness") or "Harness (not identified yet)",
             f"llama-server {build or '(version unknown)'}",
-            model or "model (waiting)")
+            model or "Model (waiting)")
         self.emit("")
 
         # One colour per participant, the way a messaging app tints each
@@ -1304,7 +1304,7 @@ class Console:
                    "server":  m.get("name"),
                    "model":   model,
                    "tool":    f"{m.get('name')} → tool result",
-                   "you":     "you"}.get(m["who"], m["who"])
+                   "you":     "You"}.get(m["who"], m["who"])
             kind = m.get("kind") or ""
             # Indent by party, the way a chat client offsets each speaker.
             # The model is a reply to whoever just spoke, so it sits deeper.
@@ -1622,10 +1622,15 @@ class Console:
         # generic word. On the FIRST request of a session no record exists
         # yet, so detection has nothing to work from and the in-flight rows
         # would say "harness" when the name is already known.
-        hname = parties.get("harness") or self.name or "harness"
+        hname = parties.get("harness") or self.name or "Harness"
         # Everything the completed thread has already shown, so an in-flight
         # request only draws what is actually new.
         already = {(m.get("text") or "").strip() for m in msgs}
+        # Thinking tokens across the thread, for the dashboard's share-of-
+        # context row. Counted here because this is where the parsed thread
+        # is, and once per rebuild rather than once per draw.
+        self._think_tok = sum((m.get("tokens") or (m.get("chars", 0) // 4))
+                              for m in msgs if m.get("kind") == "thinking")
         # The system prompt of the most recent COMPLETED request, for the
         # side-call test used on in-flight turns below.
         last_pre = None
@@ -1916,7 +1921,7 @@ class Console:
         if cached is not None and pt:
             fr = cached / pt
             bar_c = curses.color_pair(2 if fr > 0.5 else 3)
-            col2.append([(pad("Cache Reuse", L), curses.color_pair(6)),
+            col2.append([(pad("KV cache hits", L), curses.color_pair(6)),
                          (meter(fr, max(6, min(12, c2 - L - 7))),
                           bar_c | curses.A_BOLD),
                          (f" {fr*100:.0f}%", bar_c)])
@@ -1949,12 +1954,52 @@ class Console:
         # tokens rather than by request — a 3-token reply should not count as
         # much as a 3,000-token one.
         dec_tok = dec_ms = pre_tok = pre_ms = 0
+        hit_tok = seen_tok = 0
         for r in self.recs:
             t_ = (r.get("meta") or {}).get("timings") or {}
             dec_tok += t_.get("predicted_n") or 0
             dec_ms += t_.get("predicted_ms") or 0
             pre_tok += t_.get("prompt_n") or 0
             pre_ms += t_.get("prompt_ms") or 0
+            # Cache hits across the session, so the same measurement appears
+            # in both sections and can be compared turn against whole.
+            #
+            # The denominator is the WHOLE prompt, from usage — `prompt_n` is
+            # only the part that had to be evaluated, so dividing by it gave
+            # 2,063% and a negative count of new tokens.
+            u_ = (r.get("meta") or {}).get("usage") or {}
+            whole = u_.get("prompt_tokens") or 0
+            hit_ = (u_.get("prompt_tokens_details") or {}).get("cached_tokens")
+            if hit_ is None:
+                hit_ = t_.get("cache_n") or 0
+            if whole:
+                seen_tok += whole
+                hit_tok += min(hit_, whole)
+        # What the model spent THINKING, as a share of the context it is
+        # carrying. A thread whose window is 40% reasoning it has already
+        # finished with is a different thing from one that is 40% code, and
+        # nothing else on screen distinguishes them.
+        #
+        # Measured during rebuild, where the parsed thread exists. `msgs_`
+        # here is the raw request message list — role/content dicts with no
+        # `kind` — so summing over it matched nothing and the row never
+        # appeared.
+        think_tok = getattr(self, "_think_tok", 0)
+        # The thinking LEVEL, when a harness asks for one. No harness seen so
+        # far sends any of these, so it shows only when one starts to.
+        level = None
+        for k in ("reasoning_effort", "reasoning", "thinking"):
+            v = req.get(k)
+            if isinstance(v, str):
+                level = v
+            elif isinstance(v, dict):
+                level = v.get("effort") or v.get("type") or v.get("level")
+            if level:
+                break
+        if not level:
+            ck = req.get("chat_template_kwargs")
+            if isinstance(ck, dict) and ck.get("enable_thinking") is not None:
+                level = "on" if ck["enable_thinking"] else "off"
         S = max(dwidth(x) for x in _SESSION_LABELS) + 1
         def kv3(label, value, attr=0):
             return [(pad(label, S), curses.color_pair(6)), (str(value), attr)]
@@ -1973,18 +2018,44 @@ class Console:
         elif pt:
             col3.append(kv3("Context", f"{pt:,} tokens", curses.A_BOLD))
             col3.append(kv3("", "window size unavailable", curses.color_pair(3)))
+        # Thinking as a share of the window. SESSION only: a single turn's
+        # thinking says nothing about what the context is carrying.
+        if think_tok and pt:
+            fr = think_tok / pt
+            col3.append([(pad("Thinking", S), curses.color_pair(6)),
+                         (meter(fr, bw), curses.color_pair(3) | curses.A_BOLD),
+                         (f" {fr*100:.0f}%", curses.color_pair(3))])
+            col3.append(kv3("", f"{think_tok:,} of {pt:,} tokens in context"))
+        if level:
+            col3.append(kv3("", f"thinking level: {level}"))
         col3 += [kv3("Requests", f"{len(self.recs):,}"),
                  kv3("Messages", f"{len(msgs_):,}")]
-        if dec_tok:
-            col3.append(kv3("Tokens Generated", f"{dec_tok:,}"))
-        if dec_ms:
-            col3.append(kv3("Decode Average",
-                            f"{dec_tok / (dec_ms/1000):.1f}/sec",
-                            curses.color_pair(3) | curses.A_BOLD))
+
+        # From here the SAME measurements as This turn, in the same order and
+        # under the same names, so the two sections can be read against each
+        # other. A metric that appears in one and not the other is one that
+        # genuinely does not exist at that scale.
+        if seen_tok:
+            fr = hit_tok / seen_tok
+            bar_c = curses.color_pair(2 if fr > 0.5 else 3)
+            col3.append([(pad("KV cache hits", S), curses.color_pair(6)),
+                         (meter(fr, bw), bar_c | curses.A_BOLD),
+                         (f" {fr*100:.0f}%", bar_c)])
+            col3.append(kv3("", f"{hit_tok:,} reused, "
+                                f"{seen_tok - hit_tok:,} new"))
         if pre_ms:
-            col3.append(kv3("Prefill Average",
-                            f"{pre_tok / (pre_ms/1000):,.0f}/sec",
-                            curses.color_pair(6) | curses.A_BOLD))
+            col3.append(kv3("Prefill",
+                            f"{pre_tok:,} tokens at "
+                            f"{pre_tok / (pre_ms/1000):,.0f}/sec"))
+            col3.append(kv3("", f"{pre_ms/1000:.2f} seconds"))
+        if dec_ms:
+            col3.append(kv3("Decode",
+                            f"{dec_tok:,} tokens at "
+                            f"{dec_tok / (dec_ms/1000):.1f}/sec",
+                            curses.color_pair(3)))
+            col3.append(kv3("", f"{dec_ms/1000:.2f} seconds"))
+        elif dec_tok:
+            col3.append(kv3("Generated", f"{dec_tok:,} tokens"))
         col3.append(kv3("Model Time", f"{total_s:.0f} seconds"))
 
         if self.stats_where() == "bottom":
@@ -1996,8 +2067,7 @@ class Console:
     #: everything; the rail is for the few numbers you watch continuously
     #: while a turn is running, and a narrow column cannot hold more without
     #: wrapping every value onto its own line.
-    RAIL_KEEP = ("Context", "Cache Reuse", "Prefill", "Decode", "Requests",
-                 "Tokens Generated", "Decode Average")
+    RAIL_KEEP = ("Context", "KV cache hits", "Prefill", "Decode", "Thinking")
 
     def _dash_panels(self, live, col1, col2, col3, cmd, full, c1, c2, c3):
         """Three bordered panels across the full width.
@@ -2025,8 +2095,11 @@ class Console:
         rows = list(live)
         # Not "latest request" — it deliberately skips background calls, so it
         # is the last turn of YOUR conversation.
-        rows.append((f"╭{hdr('Model Details', c1)}┬{hdr('Current Request', c2)}"
-                     f"┬{hdr('Session Totals', c3)}╮",
+        # The SAME section names as the rail. The two placements show the
+        # same three groups; calling them different things in each made a
+        # reader learn the layout twice.
+        rows.append((f"╭{hdr('Model', c1)}┬{hdr('This turn', c2)}"
+                     f"┬{hdr('Session', c3)}╮",
                      curses.A_BOLD | curses.color_pair(6)))
         def spans_of(cell, width, base=0):
             """A column cell -> [(text, attr)] padded to exactly `width`."""
@@ -2108,13 +2181,37 @@ class Console:
 
     def _dash_rail(self, live, col1, col2, col3, cmd, W):
         """A narrow vertical rail: the same cells, filtered and stacked."""
-        def heading(text):
-            # A rule to the right of the title, so each section reads as a
-            # group with its numbers under it rather than as one long column
-            # of figures with occasional bold words in it.
-            pad = max(1, W - 2 - dwidth(text) - 1)
-            return ([(text, curses.A_BOLD | curses.color_pair(6)),
-                     (" " + "─" * pad, curses.color_pair(8))], 0)
+        # Each section is a BOX. A rule under a heading was a half-measure:
+        # it separated the titles from each other and left the numbers
+        # floating in one undifferentiated column. A border says where a
+        # group starts and, more usefully, where it ends.
+        # W - 6, not W - 4: a box row is `inner + 4` cells, and draw() writes
+        # rail rows with a limit of rw - 2, so a box sized to the full rail
+        # lost its right border on every line.
+        inner = max(8, W - 6)
+        edge = curses.color_pair(8)
+
+        def top(text):
+            # "╭─ " + title + " " + rule + "─╮" is six cells of chrome, so
+            # the rule is what is left after the title and those six, less
+            # the two the closing "─╮" already counts.
+            fill = max(1, inner - dwidth(text) - 2)
+            return ([("╭─ ", edge),
+                     (text, curses.A_BOLD | curses.color_pair(6)),
+                     (" " + "─" * fill + "─╮", edge)], 0)
+
+        def bottom():
+            return ([("╰" + "─" * (inner + 2) + "╯", edge)], 0)
+
+        def boxed(row):
+            """One section row, inside the border."""
+            cells, _ = row
+            if isinstance(cells, str):
+                cells = [(cells, 0)]
+            body = "".join(t for t, _ in cells)
+            gap = max(0, inner - dwidth(body))
+            return ([("│ ", edge)] + list(cells)
+                    + [(" " * gap + " │", edge)], 0)
 
         rows = list(live)
         # Current turn FIRST. A short window drops rows off the end, and with
@@ -2143,9 +2240,9 @@ class Console:
                     # the label column's padding, which in a rail left the
                     # value stranded sixteen spaces from the edge.
                     body = "".join(t for t, _ in cell).strip()
-                    for piece in self._wrap(body, max(8, W - 3), ""):
+                    for piece in self._wrap(body, max(8, inner - 2), ""):
                         section.append(([("  " + piece, cell[-1][1])], 0))
-                elif dwidth("".join(t for t, _ in cell)) <= W - 2:
+                elif dwidth("".join(t for t, _ in cell)) <= inner:
                     # W-2, not W-1: draw() writes rail rows with a limit of
                     # rw-2, so a row accepted at rw-1 lost its last cell.
                     section.append((list(cell), 0))
@@ -2158,18 +2255,19 @@ class Console:
                     rest = [(t, a) for t, a in cell[1:] if t.strip()]
                     if label:
                         section.append(([(label, cell[0][1])], 0))
-                    if rest and dwidth("".join(t for t, _ in rest)) <= W - 3:
+                    if rest and dwidth("".join(t for t, _ in rest)) <= inner - 2:
                         section.append(([("  ", 0)] + rest, 0))
                     else:
                         for t, a in rest:
-                            for piece in self._wrap(t, max(8, W - 3), ""):
+                            for piece in self._wrap(t, max(8, inner - 2), ""):
                                 section.append(([("  " + piece, a)], 0))
             if not any(r != ("", 0) for r in section):
                 continue
             if rows and rows[-1] != ("", 0):
                 rows.append(("", 0))
-            rows.append(heading(title))
-            rows.extend(section)
+            rows.append(top(title))
+            rows.extend(boxed(r) for r in section if r != ("", 0))
+            rows.append(bottom())
         return rows
 
     # -------------------------------------------------------------------- layout
