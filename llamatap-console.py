@@ -534,8 +534,7 @@ HELP = [
     "gg               jump to the start of the conversation",
     "G                jump to the newest message and follow new ones",
     "click a node row expand or collapse it — anywhere on the line",
-    "x                number the expandable nodes, then press 1-9 to toggle",
-    "o                expand or collapse everything in this exchange",
+    "o                expand or collapse everything",
     "r                tool-call arguments: raw JSON off the wire vs readable",
     "p                open or close the system prompt",
     "f                show or hide the launch settings in Model Details",
@@ -1239,7 +1238,7 @@ class Console:
         self.chips = self.build_chips(
             parties.get("harness") or "Harness (not identified yet)",
             f"Llama {build or '(build unknown)'}",
-            model or "Model (waiting)")
+            (model[:1].upper() + model[1:]) if model else "Model (waiting)")
         self.emit("")
 
         # One colour per participant, the way a messaging app tints each
@@ -1737,7 +1736,7 @@ class Console:
                 return {
                     "you": ("You", "\033[32m"),
                     "model": (mdl, "\033[33m"),
-                    "harness": (f"{hname} → context", "\033[36m"),
+                    "harness": (f"{hname} → {mdl}", "\033[36m"),
                 }.get(twho, (f"{hname} → tool result", "\033[36m"))
 
             rows_ = [speaker(twho) + (text,) for twho, text in asked] or \
@@ -1758,6 +1757,10 @@ class Console:
                 if text:
                     self.block(text, col_, LEFT, max(24, W2 - 2),
                                text_col=C_BODY)
+                    # Every other block has a gap after it; without one here
+                    # the in-flight turns ran into each other and into the
+                    # conversation above them.
+                    self.emit("")
             self.emit("")
 
             think, text = job.get("thinking") or "", job.get("text") or ""
@@ -1843,10 +1846,15 @@ class Console:
             # border at every width.
             full = self.scr.getmaxyx()[1] - 4
         live = self.live_rows(full - 2)
-        if not self.recs:
-            return live + [("  waiting for the first request…", curses.color_pair(6))]
-
-        rec = self._dash_rec if self._dash_rec is not None else self.recs[-1]
+        # No early return for an empty recording. The panel is a fixed
+        # skeleton: every section and every row exists from the moment the
+        # console opens, and only the NUMBERS change. It used to render a
+        # single "waiting…" line and then grow its boxes a row at a time as
+        # data arrived, so the thing you were trying to read moved under you
+        # for the first minute of every session.
+        rec = ({"req": {}, "meta": {}} if not self.recs
+               else self._dash_rec if self._dash_rec is not None
+               else self.recs[-1])
         bg_last = self._dash_bg
         req = rec.get("req") or {}
         model = req.get("model") or "?"
@@ -1935,27 +1943,26 @@ class Console:
         # request put on the table. It happens to be constant today, but a
         # harness that drops tools as context fills is exactly the kind of
         # thing this instrument exists to catch.
+        # Every row, always. A metric with no data yet reads zero rather than
+        # being absent, so the panel never changes shape while you watch it.
         col2.append(kv("Tools Offered", f"{len(req.get('tools') or [])}"))
-        if cached is not None and pt:
-            fr = cached / pt
-            bar_c = curses.color_pair(2 if fr > 0.5 else 3)
-            col2.append([(pad("KV cache hits", L), curses.color_pair(6)),
-                         (meter(fr, max(6, min(12, c2 - L - 7))),
-                          bar_c | curses.A_BOLD),
-                         (f" {fr*100:.0f}%", bar_c)])
-            col2.append(kv("", f"{cached:,} reused, {pt-cached:,} new"))
-        if tm:
-            col2.append(kv("Prefill",
-                           f"{tm.get('prompt_n', 0):,} tokens at "
-                           f"{tm.get('prompt_per_second', 0):,.0f}/sec"))
-            col2.append(kv("", f"{tm.get('prompt_ms', 0)/1000:.2f} seconds"))
-            col2.append(kv("Decode",
-                           f"{tm.get('predicted_n', 0):,} tokens at "
-                           f"{tm.get('predicted_per_second', 0):.1f}/sec",
-                           curses.color_pair(3)))
-            col2.append(kv("", f"{tm.get('predicted_ms', 0)/1000:.2f} seconds"))
-        elif ct:
-            col2.append(kv("Generated", f"{ct:,} tokens"))
+        fr = (cached / pt) if (cached is not None and pt) else 0.0
+        bar_c = curses.color_pair(2 if fr > 0.5 else 3)
+        col2.append([(pad("KV cache hits", L), curses.color_pair(6)),
+                     (meter(fr, max(6, min(12, c2 - L - 7))),
+                      bar_c | curses.A_BOLD),
+                     (f" {fr*100:.0f}%", bar_c)])
+        col2.append(kv("", f"{cached or 0:,} reused, "
+                          f"{max(0, (pt or 0) - (cached or 0)):,} new"))
+        col2.append(kv("Prefill",
+                       f"{tm.get('prompt_n', 0):,} tokens at "
+                       f"{tm.get('prompt_per_second', 0):,.0f}/sec"))
+        col2.append(kv("", f"{tm.get('prompt_ms', 0)/1000:.2f} seconds"))
+        col2.append(kv("Decode",
+                       f"{tm.get('predicted_n', 0) or ct or 0:,} tokens at "
+                       f"{tm.get('predicted_per_second', 0):.1f}/sec",
+                       curses.color_pair(3)))
+        col2.append(kv("", f"{tm.get('predicted_ms', 0)/1000:.2f} seconds"))
         if not pt and not tm:
             why = ("response exceeded the capture cap"
                    if len(rec.get("resp") or "") > 190000 else "no token stats")
@@ -2026,24 +2033,23 @@ class Console:
         # it push the percentage off the edge.
         bw = max(6, min(12, c3 - S - 7))
         col3 = []
-        if pt and limit:
-            fr = pt / limit
-            bar_c = curses.color_pair(2 if fr < 0.7 else 3 if fr < 0.9 else 1)
-            col3.append([(pad("Context", S), curses.color_pair(6)),
-                         (meter(fr, bw), bar_c | curses.A_BOLD),
-                         (f" {fr*100:.0f}%", bar_c)])
-            col3.append(kv3("", f"{pt:,} of {limit:,} tokens"))
-        elif pt:
-            col3.append(kv3("Context", f"{pt:,} tokens", curses.A_BOLD))
-            col3.append(kv3("", "window size unavailable", curses.color_pair(3)))
+        # Same skeleton rule as This turn: every row exists from the start.
+        fr = (pt / limit) if (pt and limit) else 0.0
+        bar_c = curses.color_pair(2 if fr < 0.7 else 3 if fr < 0.9 else 1)
+        col3.append([(pad("Context", S), curses.color_pair(6)),
+                     (meter(fr, bw), bar_c | curses.A_BOLD),
+                     (f" {fr*100:.0f}%", bar_c)])
+        col3.append(kv3("", f"{pt or 0:,} of {limit:,} tokens" if limit
+                            else f"{pt or 0:,} tokens, window size unknown"))
         # Thinking as a share of the window. SESSION only: a single turn's
         # thinking says nothing about what the context is carrying.
-        if think_tok and pt:
-            fr = think_tok / pt
+        if True:
+            fr = (think_tok / pt) if (think_tok and pt) else 0.0
             col3.append([(pad("Thinking", S), curses.color_pair(6)),
                          (meter(fr, bw), curses.color_pair(3) | curses.A_BOLD),
                          (f" {fr*100:.0f}%", curses.color_pair(3))])
-            col3.append(kv3("", f"{think_tok:,} of {pt:,} tokens in context"))
+            col3.append(kv3("", f"{think_tok:,} of {pt or 0:,} tokens "
+                                f"in context"))
         if level:
             col3.append(kv3("", f"thinking level: {level}"))
         col3 += [kv3("Requests", f"{len(self.recs):,}"),
@@ -2053,27 +2059,23 @@ class Console:
         # under the same names, so the two sections can be read against each
         # other. A metric that appears in one and not the other is one that
         # genuinely does not exist at that scale.
-        if seen_tok:
-            fr = hit_tok / seen_tok
-            bar_c = curses.color_pair(2 if fr > 0.5 else 3)
-            col3.append([(pad("KV cache hits", S), curses.color_pair(6)),
-                         (meter(fr, bw), bar_c | curses.A_BOLD),
-                         (f" {fr*100:.0f}%", bar_c)])
-            col3.append(kv3("", f"{hit_tok:,} reused, "
-                                f"{seen_tok - hit_tok:,} new"))
-        if pre_ms:
-            col3.append(kv3("Prefill",
-                            f"{pre_tok:,} tokens at "
-                            f"{pre_tok / (pre_ms/1000):,.0f}/sec"))
-            col3.append(kv3("", f"{pre_ms/1000:.2f} seconds"))
-        if dec_ms:
-            col3.append(kv3("Decode",
-                            f"{dec_tok:,} tokens at "
-                            f"{dec_tok / (dec_ms/1000):.1f}/sec",
-                            curses.color_pair(3)))
-            col3.append(kv3("", f"{dec_ms/1000:.2f} seconds"))
-        elif dec_tok:
-            col3.append(kv3("Generated", f"{dec_tok:,} tokens"))
+        fr = (hit_tok / seen_tok) if seen_tok else 0.0
+        bar_c = curses.color_pair(2 if fr > 0.5 else 3)
+        col3.append([(pad("KV cache hits", S), curses.color_pair(6)),
+                     (meter(fr, bw), bar_c | curses.A_BOLD),
+                     (f" {fr*100:.0f}%", bar_c)])
+        col3.append(kv3("", f"{hit_tok:,} reused, "
+                            f"{max(0, seen_tok - hit_tok):,} new"))
+        col3.append(kv3("Prefill",
+                        f"{pre_tok:,} tokens at "
+                        f"{(pre_tok / (pre_ms/1000)) if pre_ms else 0:,.0f}"
+                        f"/sec"))
+        col3.append(kv3("", f"{pre_ms/1000:.2f} seconds"))
+        col3.append(kv3("Decode",
+                        f"{dec_tok:,} tokens at "
+                        f"{(dec_tok / (dec_ms/1000)) if dec_ms else 0:.1f}"
+                        f"/sec", curses.color_pair(3)))
+        col3.append(kv3("", f"{dec_ms/1000:.2f} seconds"))
         col3.append(kv3("Model Time", f"{total_s:.0f} seconds"))
 
         if self.stats_where() == "bottom":
@@ -2649,7 +2651,7 @@ class Console:
             # at the terminal width, and `q quit` used to sit at the very end
             # where it was the first thing lost on an 80-column window.
             hint = self.msg or (" / commands  ·  q quit  ·  jk gg G scroll  ·  "
-                                "click a row to expand  ·  x list  ·  o all  ·  "
+                                "click a row to expand  ·  o all  ·  "
                                 "r raw json  ·  p system prompt  ·  y copy ")
             try:
                 scr.addnstr(H - 1, 0, hint.ljust(W - 1), W - 1,
@@ -2704,73 +2706,43 @@ class Console:
         self.rebuild()
 
     def toggle_expand_all(self):
-        """Expand or collapse everything in the exchange you are looking at.
+        """Expand or collapse EVERYTHING, across the whole conversation.
 
-        Driven by the nodes actually on screen, not by a hand-built list.
-        `expand_menu()` collected the system prompt, the content markers and
-        each individual tool — but never the `+ N tools` CONTAINER those tools
-        live inside, nor the system prompt's sections. So "expand all" opened
-        the children of a node it left shut, and the tool list stayed
-        invisible no matter how many times you pressed the key.
+        It used to be scoped to the exchange at the top of the view, so
+        pressing it opened some nodes and left others shut depending on where
+        you had scrolled — which reads as the key half working rather than as
+        a deliberate scope.
+
+        Driven by the nodes actually on screen, not by a hand-built list: an
+        earlier version collected the system prompt, the markers and each
+        individual tool, but never the `+ N tools` CONTAINER those tools live
+        inside, so "expand all" opened the children of a node it left shut.
 
         Opening a container reveals nodes that did not exist a moment ago, so
         this repeats until nothing new appears rather than assuming one pass
         is enough. Bounded, because a bug in node generation must not spin.
         """
-        rec = self.rec_at(self.top) or (self.recs[-1] if self.recs else None)
-        if rec is None:
+        if not self.hotspots and not self.open:
             return "nothing to expand"
-        ri = self.recs.index(rec)
-        here = [nid for (_l, _a, _b, nid) in self.hotspots if nid[0] == ri]
-        if any(nid in self.open for nid in here):
+        if self.open:
             for nid in list(self.open):
-                if nid[0] == ri:
-                    self.open.discard(nid)
-                    self.touched.add(nid)
-            return "collapsed this exchange"
+                self.touched.add(nid)
+            self.open.clear()
+            return "collapsed everything"
         for _ in range(8):
             grew = False
             for (_l, _a, _b, nid) in list(self.hotspots):
-                if nid[0] == ri and nid not in self.open:
+                if nid not in self.open:
                     self.open.add(nid)
                     self.touched.add(nid)
                     grew = True
             if not grew:
                 break
             self.rebuild()
-        return "expanded this exchange"
-
+        return "expanded everything"
     def toggle_exchange(self):
         return self.toggle_expand_all()
 
-    def expand_menu(self):
-        """Keyboard route: everything expandable in the exchange you are
-        LOOKING at, not the newest one — scrolling back to an exchange and
-        pressing x should expand that one.
-        """
-        if not self.recs:
-            return
-        rec = self.rec_at(self.top) or self.recs[-1]
-        ri = self.recs.index(rec)
-        req = rec.get("req") or {}
-        pre, _ = T.normalise(req)
-        items = [(ri, "preamble", "system prompt")]
-        for lab, icon, needles in cat_markers():
-            # case-SENSITIVE, matching markers_in() and detail_for(); see the
-            # note in llamatap-catalog.py
-            if any(nd in pre for nd in needles):
-                items.append((ri, "marker", lab))
-        for t in (req.get("tools") or []):
-            if isinstance(t, dict):
-                n = t.get("name") or (t.get("function") or {}).get("name")
-                if n:
-                    items.append((ri, "tool", n))
-        self.menu = items
-        self.msg = (" press 1-9 to expand/collapse: "
-                    + "  ".join(f"{i}:{k[:12]}" for i, (_, _, k) in enumerate(items[:9], 1)))
-        self.msg_until = time.time() + 15
-
-    # ------------------------------------------------------------------ commands
     def note(self, text, secs=8):
         """Transient status, shown on the bottom line and then forgotten.
 
@@ -3291,12 +3263,6 @@ class Console:
                     self.follow = True; self.to_bottom()
                 elif ch == ord("r"):
                     self.run_cmd("raw")
-                elif ch == ord("x"):
-                    self.expand_menu()
-                elif 49 <= ch <= 57 and self.menu:
-                    n = ch - 48
-                    if n <= len(self.menu):
-                        self.toggle(self.menu[n - 1])
                 elif ch in (ord("o"), ord("O")):
                     # One key that toggles. Two keys differing only by shift,
                     # one expanding the current exchange and the other

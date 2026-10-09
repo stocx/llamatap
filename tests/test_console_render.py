@@ -1817,15 +1817,41 @@ class ExpandToggle(TapTest):
         return c
 
     def press_o(self, c):
-        """What the key handler does, without driving the event loop."""
-        c.expand_menu()
-        if any(nid in c.open for nid in c.menu):
-            for nid in c.menu:
-                c.open.discard(nid)
-        else:
-            for nid in c.menu:
-                c.open.add(nid)
+        """What the key handler actually does.
+
+        This used to re-implement an older version — building `menu` with
+        `expand_menu()` and toggling that — while the key called
+        `toggle_expand_all()`. So it tested code the keyboard never reached,
+        which is why "o does not work" went unnoticed here.
+        """
+        c.toggle_expand_all()
         c.rebuild()
+
+    def test_it_expands_every_exchange_not_just_one(self):
+        """It was scoped to the exchange at the top of the view, so pressing
+        it opened some nodes and left others shut depending on where you had
+        scrolled — which reads as the key half working."""
+        c = self.console()
+        # Two exchanges that each own nodes. The stock fixture shares one
+        # system prompt, so only the FIRST gets a setup block and the test
+        # could not tell a scoped expand from a global one.
+        second = a_record(1)
+        second["req"]["messages"][0]["content"] = "# Other\ndifferent prompt"
+        c.recs = [a_record(0), second]
+        c.rebuild()
+        recs_with_nodes = {nid[0] for (_l, _a, _b, nid) in c.hotspots}
+        self.assertGreater(len(recs_with_nodes), 1,
+                           "the fixture has nodes in only one exchange")
+        self.press_o(c)
+        shut = [nid for (_l, _a, _b, nid) in c.hotspots if nid not in c.open]
+        self.assertEqual(shut, [], f"{len(shut)} nodes left shut: {shut[:3]}")
+
+    def test_the_x_list_key_is_gone(self):
+        src = open(os.path.join(ROOT, "llamatap-console.py")).read()
+        self.assertNotIn("expand_menu", src, "the x-list code survives")
+        for line in self.C.HELP:
+            self.assertFalse(line.startswith("x "),
+                             f"x is still documented: {line!r}")
 
     def test_it_toggles_back_and_forth(self):
         c = self.console()
@@ -3598,6 +3624,20 @@ class TheQuestionIsVisibleWhileAnswered(TapTest):
         self.assertLess(early, late,
                         "the request that started second was drawn first")
 
+    def test_in_flight_blocks_are_spaced(self):
+        """Every other block has a gap after it; without one the in-flight
+        turns ran into each other and into the conversation above them."""
+        c = self.console(reqs={"k1": {"model": "q", "messages": [
+            {"role": "system", "content": "# Tone\nbe terse"},
+            {"role": "user", "content": "context one"},
+            {"role": "user", "content": "the question"}]}})
+        rows = self.rows(c)
+        i = next(i for i, l in enumerate(rows) if "context one" in l)
+        tail = rows[i + 1:]
+        gap = next((k for k, l in enumerate(tail) if not l.strip()), None)
+        self.assertIsNotNone(gap, "no gap after an in-flight block")
+        self.assertLess(gap, 3, f"the blocks run together: {tail[:4]}")
+
     def test_injected_context_is_not_called_a_tool_result(self):
         """It is the harness's own prepended context, which is a different
         thing entirely — and the one label it must not have."""
@@ -3608,7 +3648,9 @@ class TheQuestionIsVisibleWhileAnswered(TapTest):
         rows = self.rows(c)
         i = next(i for i, l in enumerate(rows) if "injected context here" in l)
         head = [l for l in rows[:i] if l.strip()][-1]
-        self.assertIn("→ context", head, f"got: {head!r}")
+        # The harness is prompting the MODEL — that is the direction that
+        # matters and "context" described the payload rather than the act.
+        self.assertIn("→ q", head, f"got: {head!r}")
         self.assertNotIn("tool result", head,
                          "injected context is labelled a tool result")
 
@@ -4418,6 +4460,78 @@ class BothPlacementsAgree(TapTest):
         self.assertIn("tokens in context", col3,
                       "the share is stated without its basis")
 
-    def test_no_thinking_means_no_thinking_row(self):
-        """A 0% row would claim a measurement that was never taken."""
-        self.assertNotIn("Thinking", self.columns(self.panel("bottom"))[3])
+    def test_the_thinking_row_exists_before_there_is_any(self):
+        """The panel is a fixed SKELETON: every section and every row exists
+        from the moment the console opens, and only the numbers change. It
+        used to grow a row at a time as data arrived, so the thing you were
+        trying to read moved under you for the first minute of a session."""
+        col3 = self.columns(self.panel("bottom"))[3]
+        self.assertIn("Thinking", col3, "the row is missing before there is "
+                                        "anything to put in it")
+        self.assertIn("0%", col3, "an empty metric should read zero")
+
+    def test_the_panel_has_the_same_shape_before_and_after_traffic(self):
+        """"The second I load console that panel should not change — only the
+        numbers should update." Measured as the set of LABELS, which is the
+        shape; the values are expected to differ."""
+        import re as _re
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (60, 170)
+
+        def labels(recs):
+            c = C.Console.__new__(C.Console)
+            c.scr = Screen(); c.recs = recs
+            c.name = None; c.extra = []; c.follow = False; c.top = 0
+            c._rail_h = {}
+            c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                      "repeats": False, "fold_thinking": True,
+                      "stats": "bottom"}
+            c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+            c.menu = []; c.detail = None; c.node_bodies = {}
+            c.show = set(C.PARTIES); c.chips = []
+            c.inflight = []; c.inflight_reqs = {}
+            c.msg = ""; c.msg_until = 0; c.tick = 0
+            c.cmd = None; c.busy = ""
+            c._flags = ""; c._flags_started = True; c._flags_err = ""
+            c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+            c.rebuild()
+            text = "\n".join(
+                "".join(x for x, _ in t) if isinstance(t, list) else t
+                for t, _a in c.dash(168))
+            return [l for l in DASHBOARD_LABELS if l in text]
+
+        self.assertEqual(labels([]), labels([a_record(i) for i in range(3)]),
+                         "the panel changed shape once traffic arrived")
+
+    def test_an_empty_recording_still_draws_every_section(self):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (60, 150)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = []
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c._rail_h = {}
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "right"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.inflight_reqs = {}
+        c.msg = ""; c.msg_until = 0; c.tick = 0; c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        text = "\n".join("".join(x for x, _ in t) if isinstance(t, list) else t
+                         for t, _a in c.dash(c.rail_w()))
+        for title in ("In flight", "This turn", "Session"):
+            with self.subTest(title=title):
+                self.assertIn(title, text,
+                              f"{title} is missing before any traffic")
+        self.assertNotIn("waiting for the first request", text,
+                         "the old placeholder is back")

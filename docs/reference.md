@@ -291,7 +291,7 @@ row and always shown; the two no longer share a toggle.
                      the + itself
     click a name     in the header row: show or hide that party
     x                number the expandable nodes, then press 1-9 to toggle
-    o                expand or collapse everything in this exchange
+    o                expand or collapse everything
     r                tool-call arguments: raw JSON off the wire vs readable
     p                open or close the system prompt
     f                show or hide the launch settings in Model Details
