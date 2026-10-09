@@ -2,7 +2,9 @@
 # your paths. They are measurement data, never source, and they must never
 # end up in a commit.
 llamatap-records.jsonl
+*.jsonl
 llamatap-inflight.json
+llamatap-inflight-req.json
 llamatap-buffer.txt
 llamatap.log
 runs/
