@@ -1235,7 +1235,7 @@ class Console:
         # now the filter control, so they have to stay reachable.
         self.chips = self.build_chips(
             parties.get("harness") or "Harness (not identified yet)",
-            f"llama-server {build or '(version unknown)'}",
+            f"Llama {build or '(build unknown)'}",
             model or "Model (waiting)")
         self.emit("")
 
@@ -1649,7 +1649,13 @@ class Console:
         # question twice. Identity is what matters and text is not identity.
         # A duplicate on screen means a STALE entry, which is what the pid
         # check in read_inflight removes.
-        for job in (self.inflight or []):
+        # Oldest first. Two requests in flight at once is normal — opencode
+        # fires its title generator alongside the real turn — and the file
+        # lists them in the order the proxy happened to register them, so the
+        # second could be drawn above the first. That is the "it appeared
+        # before my prompt, then moved" effect: nothing was reordered
+        # afterwards; they were drawn wrong to begin with.
+        for job in sorted(self.inflight or [], key=lambda j: j.get("t0") or 0):
             sp = SPIN[self.tick % len(SPIN)]
             mdl = job.get("model") or model
             # The REQUEST half of an exchange, held in place while it is in
@@ -1715,14 +1721,23 @@ class Console:
             # on the row that names the speaker. A bare "sending" row is kept
             # only when there is nothing new to show — a prefill, or a request
             # whose every turn the thread has already drawn.
-            rows_ = [(hname if side else {
-                          "you": "you", "model": mdl,
-                      }.get(twho, f"{hname} → tool result"),
-                      "\033[36m" if side else {
-                          "you": "\033[32m", "model": "\033[33m",
-                      }.get(twho, "\033[36m"),
-                      text)
-                     for twho, text in asked] or \
+            def speaker(twho):
+                """(name, colour) for one in-flight turn.
+
+                `harness` here means the consecutive-turn rule above
+                reassigned it: context the harness prepended. It used to fall
+                through to "tool result", which is a different thing entirely
+                and the one label it must not have.
+                """
+                if side:
+                    return hname, "\033[36m"
+                return {
+                    "you": ("You", "\033[32m"),
+                    "model": (mdl, "\033[33m"),
+                    "harness": (f"{hname} → context", "\033[36m"),
+                }.get(twho, (f"{hname} → tool result", "\033[36m"))
+
+            rows_ = [speaker(twho) + (text,) for twho, text in asked] or \
                 [(f"{hname} → sending", C_DIM, None)]
             for k, (name, col_, text) in enumerate(rows_):
                 # The size and state sit on the FIRST row only; repeating

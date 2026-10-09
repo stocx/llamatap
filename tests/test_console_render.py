@@ -1310,6 +1310,12 @@ class PartyFilter(TapTest):
     def text_of(self, c):
         return "\n".join("".join(ch for _, ch, _ in spans) for spans in c.lines)
 
+    def test_the_server_chip_says_llama(self):
+        c = self.console()
+        by = {p: label for p, label, _a, _b in c.chips}
+        self.assertTrue(by["server"].startswith("Llama"),
+                        f"got: {by['server']!r}")
+
     def test_all_four_parties_are_on_by_default(self):
         c = self.console()
         self.assertEqual(c.show, set(self.C.PARTIES))
@@ -3521,7 +3527,7 @@ class TheQuestionIsVisibleWhileAnswered(TapTest):
         in flight against the last completed request."""
         head = self.speaker_of(self.rows(self.console()), "Generate a title")
         self.assertIn("opencode", head, f"got: {head!r}")
-        self.assertNotRegex(head.strip(), r"^you\b",
+        self.assertNotRegex(head.strip(), r"^You\b",
                             "claimed the user typed it")
 
     def test_your_own_message_is_still_yours(self):
@@ -3533,7 +3539,7 @@ class TheQuestionIsVisibleWhileAnswered(TapTest):
             {"role": "user", "content": "write some code"}]}
         rows = self.rows(self.console(reqs={"k1": same_prompt}))
         head = self.speaker_of(rows, "write some code")
-        self.assertRegex(head.strip(), r"^you\b",
+        self.assertRegex(head.strip(), r"^You\b",
                          f"the user's own message is attributed elsewhere: "
                          f"{head!r}")
 
@@ -3553,9 +3559,47 @@ class TheQuestionIsVisibleWhileAnswered(TapTest):
         rows = self.rows(self.console(reqs={"k1": two_user}))
         i = next(i for i, l in enumerate(rows) if "harness preamble" in l)
         head = [l for l in rows[:i] if l.strip()][-1]
-        self.assertNotRegex(head.strip(), r"^you\b",
+        self.assertNotRegex(head.strip(), r"^You\b",
                             f"the harness's own preamble is reported as "
                             f"yours: {head!r}")
+
+    def test_concurrent_requests_render_in_start_order(self):
+        """Two in flight at once is normal — opencode fires its title
+        generator alongside the real turn. The file lists them in dict order,
+        so the second could be drawn above the first, which is the "it
+        appeared before my prompt, then moved" effect. Nothing was reordered
+        afterwards; they were drawn wrong to begin with."""
+        c = self.console(reqs={
+            "late": {"model": "q", "messages": [
+                {"role": "system", "content": "<task>\nTitle.\n</task>"},
+                {"role": "user", "content": "LATER REQUEST"}]},
+            "early": {"model": "q", "messages": [
+                {"role": "system", "content": "# Tone\nbe terse"},
+                {"role": "user", "content": "EARLIER REQUEST"}]}})
+        c.inflight = [
+            {"key": "late", "model": "q", "t0": 200, "state": "prefill"},
+            {"key": "early", "model": "q", "t0": 100, "state": "prefill"},
+        ]
+        c.rebuild()
+        rows = self.rows(c)
+        early = next(i for i, l in enumerate(rows) if "EARLIER" in l)
+        late = next(i for i, l in enumerate(rows) if "LATER" in l)
+        self.assertLess(early, late,
+                        "the request that started second was drawn first")
+
+    def test_injected_context_is_not_called_a_tool_result(self):
+        """It is the harness's own prepended context, which is a different
+        thing entirely — and the one label it must not have."""
+        c = self.console(reqs={"k1": {"model": "q", "messages": [
+            {"role": "system", "content": "# Tone\nbe terse"},
+            {"role": "user", "content": "injected context here"},
+            {"role": "user", "content": "the person's words"}]}})
+        rows = self.rows(c)
+        i = next(i for i, l in enumerate(rows) if "injected context here" in l)
+        head = [l for l in rows[:i] if l.strip()][-1]
+        self.assertIn("→ context", head, f"got: {head!r}")
+        self.assertNotIn("tool result", head,
+                         "injected context is labelled a tool result")
 
     def test_a_turn_already_shown_is_not_drawn_again(self):
         """A title generator quotes the conversation back, so its final turn
@@ -4191,6 +4235,27 @@ class BothPlacementsAgree(TapTest):
         cols = self.columns(self.panel("bottom"))
         self.assertIn("Tools Offered", cols[2])
         self.assertNotIn("Tools Offered", cols[3])
+
+    def test_the_server_party_is_named_llama(self):
+        """The generic party words are capitalised — You, Harness, Model,
+        Llama. A DETECTED name is left exactly as the program spells itself:
+        opencode is lowercase by its own branding, and correcting it would be
+        inventing a name."""
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen()
+        chips = C.Console.build_chips(c, "opencode", "Llama b11040", "qwen3.5")
+        by = {p: label for p, label, _a, _b in chips}
+        self.assertEqual(by["you"], "You")
+        self.assertTrue(by["server"].startswith("Llama"),
+                        f"the server party is not Llama: {by['server']!r}")
+        self.assertEqual(by["harness"], "opencode",
+                         "a detected name was recapitalised")
 
     def test_the_party_words_are_capitalised(self):
         C = self.C

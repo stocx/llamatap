@@ -108,7 +108,7 @@ per-exchange headers. Every message appears where it happened; a `+` opens
 structure in place.
 
 ```
-  Filter:  you ▼   opencode ▼   llama-server b11040 ▼   qwen3.5-35b-moe ▽
+  Filter:  You ▼   opencode ▼   Llama b11040 ▼   qwen3.5-35b-moe ▽
 
   opencode → prompting                    45,724 chars · ~11,431 tokens · 11.4s prefill
   ▌ + system prompt   23,022 chars · 50% of the request
