@@ -141,6 +141,30 @@ class CellWidths(TapTest):
         self.assertEqual(self.C.meter(0.0, 10).count("█"), 0)
         self.assertEqual(self.C.meter(1.0, 10).count("█"), 10)
 
+    def test_sparkline_is_bounded_and_marks_empty_history(self):
+        self.assertEqual(self.C.dwidth(self.C.sparkline([1, 2, 3, 4], 8)), 8)
+        self.assertEqual(self.C.sparkline([], 5), "·····")
+        self.assertEqual(self.C.sparkline([4, 4, 4], 3), "▄▄▄")
+        self.assertEqual(self.C.sparkline([float("nan"), 2], 2), "·▄")
+
+    def test_context_gauge_changes_colour_as_the_window_fills(self):
+        spans = self.C.meter_spans(.95, 20)
+        pairs = [self.C.curses.pair_number(attr) for text, attr in spans
+                 if text.startswith("█")]
+        self.assertEqual(pairs, [2, 3, 1])
+        self.assertEqual(sum(self.C.dwidth(text) for text, _ in spans), 20)
+
+    def test_high_cache_reuse_uses_the_good_quality_colour(self):
+        spans = self.C.meter_spans(.90, 20, quality=True)
+        filled = [(text, self.C.curses.pair_number(attr))
+                  for text, attr in spans if text.startswith("█")]
+        self.assertEqual(filled, [("█" * 18, 2)])
+
+    def test_display_names_use_consistent_brand_and_model_casing(self):
+        self.assertEqual(self.C.display_name("opencode"), "OpenCode")
+        self.assertEqual(self.C.display_name("qwen3.5-35b-moe"),
+                         "Qwen3.5-35B-MoE")
+
 
 #: every label the old three-panel dashboard showed, taken from dash() before
 #: the restyle. The restyle must not quietly drop one.
@@ -152,8 +176,9 @@ class CellWidths(TapTest):
 # other.
 DASHBOARD_LABELS = [
     "Model", "Quantised", "Runtime", "Slots", "Sampling",
-    "Tools Offered", "KV cache hits", "Prefill", "Decode",
-    "Context", "Requests", "Messages", "Model Time",
+    "Tools Offered", "KV Cache Hits", "Prefill", "Decode",
+    "Context", "Requests", "Messages", "Avg Decode", "Model Time",
+    "Decode Trend",
 ]
 SETTINGS_LABELS = [
     "GPU Layers", "Experts on CPU", "Context Window", "K Cache", "V Cache",
@@ -219,6 +244,23 @@ class StatsRail(TapTest):
         missing = [l for l in DASHBOARD_LABELS if l not in text]
         self.assertEqual(missing, [], f"statistics lost in the restyle: {missing}")
 
+    def test_the_session_shows_a_recent_decode_speed_trend(self):
+        c = self.console(40, 160, stats="bottom")
+        text = self.rail_text(c, width=158)
+        self.assertIn("Avg Decode", text)
+        self.assertIn("Decode Trend", text)
+        self.assertIn("latest 83 tok/s", text)
+        self.assertTrue(any(g in text for g in "▁▂▃▄▅▆▇█"),
+                        f"no graphical speed history: {text}")
+
+    def test_bottom_panel_sections_have_distinct_accent_colours(self):
+        c = self.console(40, 160, stats="bottom")
+        header = next(row for row, _attr in c.dash(158)
+                      if isinstance(row, list) and row[0][0].startswith("╭"))
+        colours = [self.C.curses.pair_number(attr) for _text, attr in header]
+        self.assertEqual(colours, [4, 2, 5],
+                         f"Model / This turn / Session accents: {colours}")
+
     def test_the_settings_board_survived(self):
         # A tall screen on purpose: the bottom panel is capped at 40% of the
         # height so it cannot own the display, and on a 40-row terminal the
@@ -246,7 +288,7 @@ class StatsRail(TapTest):
         # the model thought, and a metric with no data has no row. What must
         # hold is that the unconditional ones are present and nothing outside
         # the list reaches the rail.
-        for want in ("Context", "KV cache hits", "Prefill", "Decode"):
+        for want in ("Context", "KV Cache Hits", "Prefill", "Decode"):
             with self.subTest(want=want):
                 self.assertIn(want, text, f"the rail dropped {want}")
         for label in ("Messages", "Tools Offered", "Quantised", "Runtime"):
@@ -797,7 +839,8 @@ class ReviewRegressions(TapTest):
             if not isinstance(spans, list) or len(spans) < 2:
                 continue
             label = spans[0][0]
-            if label.strip() and spans[1][0].strip() and "│" not in label:
+            if (label.strip() and spans[1][0].strip() and "│" not in label
+                    and not label.startswith("╭")):
                 self.assertTrue(label.endswith(" "),
                                 f"{label!r} has no gap after it")
 
@@ -860,7 +903,7 @@ class ReviewRegressions(TapTest):
                 rows = [r for r in self.rail_rows(self.console(cols=cols))
                         if r.strip()]
                 for i, row in enumerate(rows):
-                    if row in ("Session", "This turn", "Model"):
+                    if row in ("Session", "This Turn", "Model"):
                         self.assertLess(i + 1, len(rows),
                                         f"{row!r} is the last row — nothing "
                                         f"under it")
@@ -1174,6 +1217,15 @@ class FilledBackground(TapTest):
                 g = self.cells(rows, cols)
                 bad = self.unfilled(g, [rows - 1], 0, cols - 1)
                 self.assertEqual(bad[:6], [], f"{len(bad)} unfilled hint cells")
+
+    def test_status_strip_uses_the_panel_palette(self):
+        g = self.cells(40, 160, stats="right")
+        row = g[-2]
+        colours = {pair for _char, pair in row if pair}
+        self.assertGreaterEqual(len(colours), 3,
+                                f"status strip lost its semantic accents: {colours}")
+        self.assertTrue(colours <= self.PANEL,
+                        f"status text punched through the panel fill: {colours}")
 
     def test_the_conversation_is_not_filled(self):
         """The fill is for panels. If it reached the transcript the whole
@@ -3564,6 +3616,19 @@ class TheQuestionIsVisibleWhileAnswered(TapTest):
                             for l in rows),
                         "the question is still invisible while it is answered")
 
+    def test_injected_context_names_the_model_that_received_it(self):
+        rec = a_record(1)
+        rec["req"] = {"model": "qwen3.5-35b-moe", "messages": [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "context supplied by OpenCode"},
+            {"role": "user", "content": "Generate a title"}]}
+        c = self.console(recs=[rec])
+        c.inflight = []; c.inflight_reqs = {}
+        c.rebuild()
+        rows = self.rows(c)
+        head = self.speaker_of(rows, "context supplied by OpenCode")
+        self.assertIn("OpenCode → Qwen3.5-35B-MoE", head, f"got: {head!r}")
+
     def test_the_prompt_comes_before_the_reply(self):
         rows = self.rows(self.console())
         q = next(i for i, l in enumerate(rows) if "Generate a title" in l)
@@ -3580,7 +3645,7 @@ class TheQuestionIsVisibleWhileAnswered(TapTest):
         the completed thread tells a side-call apart, and the same test works
         in flight against the last completed request."""
         head = self.speaker_of(self.rows(self.console()), "Generate a title")
-        self.assertIn("opencode", head, f"got: {head!r}")
+        self.assertIn("OpenCode", head, f"got: {head!r}")
         self.assertNotRegex(head.strip(), r"^You\b",
                             "claimed the user typed it")
 
@@ -3667,7 +3732,7 @@ class TheQuestionIsVisibleWhileAnswered(TapTest):
         head = [l for l in rows[:i] if l.strip()][-1]
         # The harness is prompting the MODEL — that is the direction that
         # matters and "context" described the payload rather than the act.
-        self.assertIn("→ q", head, f"got: {head!r}")
+        self.assertIn("→ Q", head, f"got: {head!r}")
         self.assertNotIn("tool result", head,
                          "injected context is labelled a tool result")
 
@@ -3702,7 +3767,7 @@ class TheQuestionIsVisibleWhileAnswered(TapTest):
         i = next(i for i, l in enumerate(rows) if "decoding" in l)
         self.assertNotIn("sending", rows[i],
                          "a bare sending row is still drawn above the turn")
-        self.assertIn("opencode", rows[i], f"got: {rows[i]!r}")
+        self.assertIn("OpenCode", rows[i], f"got: {rows[i]!r}")
 
     def test_a_bare_sending_row_when_there_is_nothing_new(self):
         """Prefill, or a request whose every turn is already on screen."""
@@ -4096,13 +4161,13 @@ class RailSectionsAreGrouped(TapTest):
         """It used to be loose rows above the boxes with nothing saying what
         they were."""
         _w, rows = self.rail()
-        self.assertTrue(any("In flight" in r for r in rows),
+        self.assertTrue(any("In Flight" in r for r in rows),
                         f"no In flight section: {rows[:3]}")
 
     def test_an_idle_rail_still_shows_the_section(self):
         """A box that vanishes when idle moves everything under it."""
         _w, rows = self.rail()
-        i = next(i for i, r in enumerate(rows) if "In flight" in r)
+        i = next(i for i, r in enumerate(rows) if "In Flight" in r)
         self.assertIn("nothing in flight", rows[i + 1],
                       "the idle state is blank rather than stated")
 
@@ -4118,13 +4183,10 @@ class RailSectionsAreGrouped(TapTest):
             def getmaxyx(self):
                 return (50, 140)
 
-        shared = {}
-
         def rows_for(inflight):
             c = C.Console.__new__(C.Console)
             c.scr = Screen(); c.recs = [a_record(i) for i in range(3)]
             c.name = None; c.extra = []; c.follow = False; c.top = 0
-            c._rail_h = shared
             c.opts = {"rawjson": False, "preamble": False, "flags": False,
                       "repeats": False, "fold_thinking": True,
                       "stats": "right"}
@@ -4144,13 +4206,24 @@ class RailSectionsAreGrouped(TapTest):
                           "state": "decoding", "tokens": 9,
                           "req_bytes": 100}])
         idle = rows_for([])
-        for title in ("This turn", "Session"):
+        self.assertEqual(len(busy), len(idle),
+                         "the rail geometry changed when a request arrived")
+        for title in ("This Turn", "Session"):
             with self.subTest(title=title):
                 a = next(i for i, r in enumerate(busy) if title in r)
                 b = next(i for i, r in enumerate(idle) if title in r)
                 self.assertEqual(a, b,
                                  f"{title} moved from row {a} to {b} when the "
                                  f"request finished")
+
+    def test_rail_keeps_the_dashboard_readable_and_compact(self):
+        _w, rows = self.rail()
+        text = "\n".join(rows)
+        self.assertIn("Context", text)
+        self.assertIn("Decode Trend", text)
+        self.assertNotIn("Model Time", text)
+        self.assertNotIn("seconds", text,
+                         "the rail should show live rates, not repeat timings")
 
     def test_every_value_sits_inside_a_border(self):
         _w, rows = self.rail()
@@ -4201,6 +4274,7 @@ class RailSectionsAreGrouped(TapTest):
         c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
         c.rebuild(); c.draw()
         head = "".join(cells[0])
+        self.assertIn("Llamatap", head, f"application title missing: {head!r}")
         self.assertIn(C.FILTER_LABEL, head)
         self.assertEqual(head.count(C.FILTER_ON), 1,
                          f"exactly one party is showing: {head!r}")
@@ -4307,7 +4381,7 @@ class BothPlacementsAgree(TapTest):
         for where in ("right", "bottom"):
             with self.subTest(where=where):
                 text = self.panel(where)
-                for title in ("This turn", "Session"):
+                for title in ("This Turn", "Session"):
                     self.assertIn(title, text,
                                   f"{where} does not say {title!r}")
 
@@ -4322,7 +4396,7 @@ class BothPlacementsAgree(TapTest):
         for where in ("right", "bottom"):
             with self.subTest(where=where):
                 text = self.panel(where)
-                self.assertIn("KV cache hits", text)
+                self.assertIn("KV Cache Hits", text)
                 self.assertNotIn("Cache Reuse", text)
 
     def columns(self, text):
@@ -4346,10 +4420,13 @@ class BothPlacementsAgree(TapTest):
         """A metric in one and not the other is one that genuinely does not
         exist at that scale — not an oversight."""
         cols = self.columns(self.panel("bottom"))
-        for shared in ("KV cache hits", "Prefill", "Decode"):
+        for shared in ("KV Cache Hits", "Prefill"):
             with self.subTest(shared=shared):
                 self.assertIn(shared, cols[2], f"This turn lost {shared}")
                 self.assertIn(shared, cols[3], f"Session lost {shared}")
+        self.assertIn("Decode", cols[2], "This turn lost its live rate")
+        self.assertIn("Avg Decode", cols[3], "Session lost its average rate")
+        self.assertIn("Decode Trend", cols[3], "Session lost its recent trend")
 
     def test_context_is_session_only(self):
         """A turn does not have a context window; the thread does."""
@@ -4367,10 +4444,8 @@ class BothPlacementsAgree(TapTest):
         self.assertNotIn("Tools Offered", cols[3])
 
     def test_the_server_party_is_named_llama(self):
-        """The generic party words are capitalised — You, Harness, Model,
-        Llama. A DETECTED name is left exactly as the program spells itself:
-        opencode is lowercase by its own branding, and correcting it would be
-        inventing a name."""
+        """Party and product names use consistent display casing without
+        changing the underlying recorded or detected identifiers."""
         C = self.C
 
         class Screen:
@@ -4384,8 +4459,8 @@ class BothPlacementsAgree(TapTest):
         self.assertEqual(by["you"], "You")
         self.assertTrue(by["server"].startswith("Llama"),
                         f"the server party is not Llama: {by['server']!r}")
-        self.assertEqual(by["harness"], "opencode",
-                         "a detected name was recapitalised")
+        self.assertEqual(by["harness"], "OpenCode",
+                         "the harness display name is not consistently cased")
 
     def test_the_party_words_are_capitalised(self):
         C = self.C
@@ -4594,7 +4669,7 @@ class BothPlacementsAgree(TapTest):
         c.rebuild()
         text = "\n".join("".join(x for x, _ in t) if isinstance(t, list) else t
                          for t, _a in c.dash(c.rail_w()))
-        for title in ("In flight", "This turn", "Session"):
+        for title in ("In Flight", "This Turn", "Session"):
             with self.subTest(title=title):
                 self.assertIn(title, text,
                               f"{title} is missing before any traffic")
@@ -4666,7 +4741,7 @@ class ShorterStatLabels(TapTest):
         """The percentage IS the reading; the raw counts were words where a
         number would do."""
         text = self.panel()
-        self.assertIn("KV cache hits", text)
+        self.assertIn("KV Cache Hits", text)
         self.assertNotIn("reused,", text, "the raw counts are still there")
 
 

@@ -19,7 +19,7 @@ attributes, so every front end shows the same thread. The DASHBOARD is drawn
 here instead of being reused, because a box-drawn panel is console chrome and
 makes no sense in a pipeable text dump.
 """
-import curses, difflib, importlib.util, io, json, os, re, shlex, subprocess, sys, threading, time, unicodedata
+import curses, difflib, importlib.util, io, json, math, os, re, shlex, subprocess, sys, threading, time, unicodedata
 from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -279,6 +279,8 @@ PARTIES = ("you", "harness", "server", "model")
 #: The header row is a control, so it says so. "in this thread:" described
 #: the row; "Filter" says what clicking a name does.
 FILTER_LABEL = "Filter:"
+APP_TITLE = "Llamatap"
+FILTER_X = LEFT + dwidth(APP_TITLE) + 2
 #: The funnel, which is what a filter control looks like everywhere else.
 #: Filled while the party is showing, hollow once it is filtered out — the
 #: same icon in two states, so it reads as one control rather than two
@@ -287,6 +289,21 @@ FILTER_LABEL = "Filter:"
 #:
 #: Both are east_asian_width A, so one cell each.
 FILTER_ON, FILTER_OFF = "\u25bc", "\u25bd"
+
+
+def display_name(value):
+    """Present names consistently without changing recorded protocol values."""
+    value = str(value or "")
+    known = {"opencode": "OpenCode", "claude-code": "Claude Code",
+             "llama-server": "Llama Server", "llama.cpp": "llama.cpp",
+             "qwen": "Qwen", "codex": "Codex"}
+    if value.casefold() in known:
+        return known[value.casefold()]
+    titled = "".join(part[:1].upper() + part[1:]
+                     if part not in (" ", "-", "_") else part
+                     for part in re.split(r"([ _-])", value))
+    titled = re.sub(r"(?<=\d)b(?=-|$)", "B", titled)
+    return re.sub(r"(?i)\bMoe\b", "MoE", titled)
 
 #: Rows the pinned header occupies: the party row, and a rule under it.
 #: Named so everything that has to agree — view_h(), the draw offset,
@@ -563,10 +580,11 @@ def on_panel(text, width=0):
 BOTTOM_MIN = 30 * 3 + 2 + 4
 
 _LEFT_LABELS = ("Model", "Quantised", "Runtime", "Slots", "Sampling",
-                "Tools Offered", "KV cache hits", "Prefill", "Decode",
+                "Tools Offered", "KV Cache Hits", "Prefill", "Decode",
                 "Generated", "Statistics", "Note")
-_SESSION_LABELS = ("Context", "Requests", "Messages", "KV cache hits",
-                   "Prefill", "Decode", "Generated", "Thinking", "Model Time")
+_SESSION_LABELS = ("Context", "Requests", "Messages", "KV Cache Hits",
+                   "Prefill", "Avg Decode", "Generated",
+                   "Thinking", "Model Time")
 
 HELP = [
     # Keys only. The slash commands come from COMMANDS, which /help prints
@@ -909,12 +927,77 @@ def pct(frac):
     return f"{int(max(0.0, min(1.0, frac or 0)) * 100)}%"
 
 
+def meter_spans(frac, n, quality=False):
+    """A segmented gauge with a cool track and semantic colour changes.
+
+    Context use heats from green through amber to red. Cache reuse is the
+    inverse: more filled segments move from red through amber to green.
+    """
+    n = max(0, int(n))
+    frac = max(0.0, min(1.0, frac or 0.0))
+    filled = int(frac * n)
+    low, high = int(n * .65), int(n * .85)
+    if quality:
+        pair = 2 if frac >= .65 else 3 if frac >= .35 else 1
+        chunks = ((filled, pair),)
+    else:
+        chunks = ((min(filled, low), 2),
+                  (max(0, min(filled, high) - low), 3),
+                  (max(0, filled - high), 1))
+    spans = [("█" * count, curses.color_pair(pair))
+             for count, pair in chunks if count]
+    if n > filled:
+        spans.append(("·" * (n - filled), curses.color_pair(9)))
+    return spans
+
+
 def meter(frac, n):
     """`░` renders as a near-solid block in several terminal fonts, which makes
     an EMPTY bar look full. `·` cannot be misread."""
     frac = max(0.0, min(1.0, frac or 0))
     full = int(frac * n)
     return "█" * full + "·" * (n - full)
+
+
+def sparkline(values, width):
+    """A compact, one-cell-per-sample trend for the dashboard."""
+    if width <= 0:
+        return ""
+    vals = [float(v) for v in values if isinstance(v, (int, float))
+            and math.isfinite(v)]
+    if not vals:
+        return "·" * width
+    vals = vals[-width:]
+    lo, hi = min(vals), max(vals)
+    levels = "▁▂▃▄▅▆▇█"
+    if hi == lo:
+        glyphs = levels[3] * len(vals)
+    else:
+        glyphs = "".join(levels[min(7, int((v - lo) / (hi - lo) * 7))]
+                         for v in vals)
+    return "·" * (width - len(glyphs)) + glyphs
+
+
+def recent_decode_rates(records, limit=12):
+    """Server-measured decode speed for recent completed requests."""
+    out = []
+    for rec in records:
+        timings = ((rec.get("meta") or {}).get("timings") or {})
+        rate = timings.get("predicted_per_second")
+        try:
+            rate = float(rate)
+        except (TypeError, ValueError):
+            rate = 0.0
+        if not math.isfinite(rate) or rate <= 0:
+            count = timings.get("predicted_n") or 0
+            ms = timings.get("predicted_ms") or 0
+            try:
+                rate = float(count) / (float(ms) / 1000) if float(ms) > 0 else 0
+            except (TypeError, ValueError, ZeroDivisionError):
+                rate = 0.0
+        if math.isfinite(rate) and rate > 0:
+            out.append(rate)
+    return out[-limit:]
 
 
 class Console:
@@ -940,9 +1023,8 @@ class Console:
         #: built by rebuild() because only it knows the harness and model
         #: names, and read by draw().
         self.chips = []
-        #: Tallest each rail box has been, so it never shrinks under a metric
-        #: that comes and goes.
-        self._rail_h = {}
+        # Right-rail cards use a fixed skeleton; their screen geometry does
+        # not depend on whatever request happened to be active earlier.
 
     # ------------------------------------------------------------- conversation
     # ------------------------------------------------------------ the tree
@@ -1097,9 +1179,10 @@ class Console:
         click target and the drawn text then cannot disagree, which is the way
         a hand-placed label and a hand-placed hotspot always eventually do.
         """
-        out, x = [], LEFT + dwidth(FILTER_LABEL) + 2
+        out, x = [], FILTER_X + dwidth(FILTER_LABEL) + 2
         for party, label in (("you", "You"), ("harness", harness),
                              ("server", server), ("model", model)):
+            label = display_name(label)
             # The mark is part of the click target: it is the affordance, so
             # clicking it has to do what it advertises.
             shown = f"{label} {FILTER_ON}"
@@ -1301,6 +1384,7 @@ class Console:
             build = (T.props(model) or {}).get("build_info", "")
         except Exception:
             pass
+        model_label = display_name(model) if model else "Model"
 
         # The four parties, as a PINNED header row rather than the first two
         # lines of the transcript: it used to scroll away, and the names are
@@ -1308,7 +1392,7 @@ class Console:
         self.chips = self.build_chips(
             parties.get("harness") or "Harness (not identified yet)",
             f"Llama {build or '(build unknown)'}",
-            (model[:1].upper() + model[1:]) if model else "Model (waiting)")
+            display_name(model) if model else "Model (waiting)")
         self.emit("")
 
         # One colour per participant, the way a messaging app tints each
@@ -1372,10 +1456,10 @@ class Console:
             # anything that was not the harness, the server or the model —
             # which meant every TOOL RESULT was attributed to the user. They
             # come back from the harness, not from a person.
-            who = {"harness": m.get("name"),
-                   "server":  m.get("name"),
-                   "model":   model,
-                   "tool":    f"{m.get('name')} → tool result",
+            who = {"harness": display_name(m.get("name")),
+                   "server":  display_name(m.get("name")),
+                   "model":   model_label,
+                   "tool":    f"{display_name(m.get('name'))} → tool result",
                    "you":     "You"}.get(m["who"], m["who"])
             kind = m.get("kind") or ""
             # Indent by party, the way a chat client offsets each speaker.
@@ -1394,7 +1478,7 @@ class Console:
                 # "→ thinking" reads the same way as "→ tool result" and
                 # "→ write()": the arrow says this is the model doing
                 # something, not a different speaker.
-                icon, who = "", f"{model} → thinking"
+                icon, who = "", f"{model_label} → thinking"
                 col = "\033[33m"
             elif kind == "tool call":
                 _c, icon = CAT.classify_tool(m.get("tool"))
@@ -1404,23 +1488,24 @@ class Console:
                 # detail, so `→ tool call [write]` lines up with `→ tool
                 # result` instead of `write()` looking like a different sort
                 # of thing entirely.
-                who = f"{model} → tool call [{m.get('tool')}]"
+                who = f"{model_label} → tool call [{m.get('tool')}]"
                 col = "\033[33m"
             elif kind == "background":
-                who = m.get("name")
+                who = display_name(m.get("name"))
             elif kind == "probe":
                 # One dim line: what was asked for, and what came back. Not a
                 # conversation turn, but not invisible either.
-                who = f"{m.get('name')} → {m.get('path')}"
+                who = f"{display_name(m.get('name'))} → {m.get('path')}"
             elif kind == "injected":
-                # Named so it is plainly not yours, and plainly not a reply.
-                who = f"{m.get('name')} → context"
+                # Name the receiving model: it makes clear where the
+                # harness-supplied context was sent.
+                who = f"{display_name(m.get('name'))} → {model_label}"
             elif kind == "error":
                 # Named like every other thing a party does — `→ thinking`,
                 # `→ tool result`. The block keeps the SERVER's colour rather
                 # than turning red: one colour per party is the rule, and the
                 # text says HTTP 503 on its first line.
-                who = f"{m.get('name')} → error"
+                who = f"{display_name(m.get('name'))} → error"
             elif kind == "cut off":
                 icon, who, col = "", "no reply", "\033[31m"
             elif kind == "setup":
@@ -1442,7 +1527,7 @@ class Console:
                 # doing something. "Request" was the HTTP word for the
                 # envelope — which is why the rows underneath still measure
                 # their share "of the request", since that is the payload.
-                who = f"{m.get('name')} → prompting"
+                who = f"{display_name(m.get('name'))} → prompting"
 
 
             if m.get("repeat"):
@@ -1700,7 +1785,7 @@ class Console:
         # generic word. On the FIRST request of a session no record exists
         # yet, so detection has nothing to work from and the in-flight rows
         # would say "harness" when the name is already known.
-        hname = parties.get("harness") or self.name or "Harness"
+        hname = display_name(parties.get("harness") or self.name or "Harness")
         # Everything the completed thread has already shown, so an in-flight
         # request only draws what is actually new.
         already = {(m.get("text") or "").strip() for m in msgs}
@@ -1730,7 +1815,7 @@ class Console:
         # afterwards; they were drawn wrong to begin with.
         for job in sorted(self.inflight or [], key=lambda j: j.get("t0") or 0):
             sp = SPIN[self.tick % len(SPIN)]
-            mdl = job.get("model") or model
+            mdl = display_name(job.get("model") or model)
             # The REQUEST half of an exchange, held in place while it is in
             # flight. Only the completed record carries the parsed request —
             # the in-flight entry has its byte count and nothing else — so the
@@ -1982,7 +2067,8 @@ class Console:
             return [(pad(label, L), curses.color_pair(6)), (str(value), attr)]
 
         build = props.get("build_info") or ""
-        col1 = [kv("Model", model, curses.A_BOLD | curses.color_pair(3)),
+        col1 = [kv("Model", display_name(model),
+                   curses.A_BOLD | curses.color_pair(3)),
                 kv("Quantised", props.get("model_ftype") or "unknown"),
                 kv("Runtime", f"llama.cpp {build}" if build
                    else "llama.cpp (version unavailable)"),
@@ -2021,18 +2107,20 @@ class Console:
         col2.append(kv("Tools Offered", f"{len(req.get('tools') or [])}"))
         fr = (cached / pt) if (cached is not None and pt) else 0.0
         bar_c = curses.color_pair(2 if fr > 0.5 else 3)
-        col2.append([(pad("KV cache hits", L), curses.color_pair(6)),
-                     (meter(fr, max(6, min(12, c2 - L - 7))),
-                      bar_c | curses.A_BOLD),
+        col2.append([(pad("KV Cache Hits", L), curses.color_pair(6)),
+                     *[(t, a | curses.A_BOLD) for t, a in
+                       meter_spans(fr, max(8, min(18, c2 - L - 10)),
+                                   quality=True)],
                      (f" {pct(fr)}", bar_c)])
         col2.append(kv("Prefill",
                        f"{tm.get('prompt_n', 0):,} tokens @ "
-                       f"{tm.get('prompt_per_second', 0):,.0f}/sec"))
+                       f"{tm.get('prompt_per_second', 0):,.0f}/sec",
+                       curses.color_pair(4)))
         col2.append(kv("", f"{tm.get('prompt_ms', 0)/1000:.2f} seconds"))
         col2.append(kv("Decode",
                        f"{tm.get('predicted_n', 0) or ct or 0:,} tokens @ "
                        f"{tm.get('predicted_per_second', 0):.1f}/sec",
-                       curses.color_pair(3)))
+                       curses.color_pair(2) | curses.A_BOLD))
         col2.append(kv("", f"{tm.get('predicted_ms', 0)/1000:.2f} seconds"))
         if not pt and not tm:
             why = ("response exceeded the capture cap"
@@ -2100,13 +2188,14 @@ class Console:
 
         # The bar has to survive a narrow column; shrink it rather than let
         # it push the percentage off the edge.
-        bw = max(6, min(12, c3 - S - 7))
+        bw = max(10, min(26, c3 - S - 9))
         col3 = []
         # Same skeleton rule as This turn: every row exists from the start.
         fr = (pt / limit) if (pt and limit) else 0.0
-        bar_c = curses.color_pair(2 if fr < 0.7 else 3 if fr < 0.9 else 1)
+        bar_c = curses.color_pair(2 if fr < 0.65 else 3 if fr < 0.85 else 1)
         col3.append([(pad("Context", S), curses.color_pair(6)),
-                     (meter(fr, bw), bar_c | curses.A_BOLD),
+                     *[(t, a | curses.A_BOLD) for t, a in
+                       meter_spans(fr, bw)],
                      (f" {pct(fr)}", bar_c)])
         col3.append(kv3("", f"{pt or 0:,} / {limit:,} tokens" if limit
                             else f"{pt or 0:,} tokens, window unknown"))
@@ -2115,8 +2204,8 @@ class Console:
         if True:
             fr = (think_tok / pt) if (think_tok and pt) else 0.0
             col3.append([(pad("Thinking", S), curses.color_pair(6)),
-                         (meter(fr, bw), curses.color_pair(3) | curses.A_BOLD),
-                         (f" {pct(fr)}", curses.color_pair(3))])
+                         (meter(fr, bw), curses.color_pair(5) | curses.A_BOLD),
+                         (f" {pct(fr)}", curses.color_pair(5))])
             col3.append(kv3("", f"{think_tok:,} / {pt or 0:,} tokens"))
         if level:
             col3.append(kv3("", f"thinking level: {level}"))
@@ -2129,19 +2218,28 @@ class Console:
         # genuinely does not exist at that scale.
         fr = (hit_tok / seen_tok) if seen_tok else 0.0
         bar_c = curses.color_pair(2 if fr > 0.5 else 3)
-        col3.append([(pad("KV cache hits", S), curses.color_pair(6)),
-                     (meter(fr, bw), bar_c | curses.A_BOLD),
+        col3.append([(pad("KV Cache Hits", S), curses.color_pair(6)),
+                     *[(t, a | curses.A_BOLD) for t, a in
+                       meter_spans(fr, bw, quality=True)],
                      (f" {pct(fr)}", bar_c)])
         col3.append(kv3("Prefill",
                         f"{pre_tok:,} tokens @ "
                         f"{(pre_tok / (pre_ms/1000)) if pre_ms else 0:,.0f}"
                         f"/sec"))
         col3.append(kv3("", f"{pre_ms/1000:.2f} seconds"))
-        col3.append(kv3("Decode",
+        col3.append(kv3("Avg Decode",
                         f"{dec_tok:,} tokens @ "
                         f"{(dec_tok / (dec_ms/1000)) if dec_ms else 0:.1f}"
-                        f"/sec", curses.color_pair(3)))
+                        f"/sec", curses.color_pair(2) | curses.A_BOLD))
         col3.append(kv3("", f"{dec_ms/1000:.2f} seconds"))
+        rates = recent_decode_rates(self.recs)
+        trend_value = (f" latest {rates[-1]:.0f} tok/s"
+                       if rates else " no samples")
+        trend_w = max(5, min(20, c3 - S - dwidth(trend_value) - 1))
+        trend = sparkline(rates, trend_w)
+        col3.append([(pad("Decode Trend", S), curses.color_pair(6)),
+                     (trend, curses.color_pair(4) | curses.A_BOLD),
+                     (trend_value, curses.color_pair(4))])
         col3.append(kv3("Model Time", f"{total_s:.0f} seconds"))
 
         if self.stats_where() == "bottom":
@@ -2153,7 +2251,8 @@ class Console:
     #: everything; the rail is for the few numbers you watch continuously
     #: while a turn is running, and a narrow column cannot hold more without
     #: wrapping every value onto its own line.
-    RAIL_KEEP = ("Context", "KV cache hits", "Prefill", "Decode", "Thinking")
+    RAIL_KEEP = ("Context", "KV Cache Hits", "Prefill", "Decode",
+                 "Avg Decode", "Decode Trend", "Thinking")
 
     def _dash_panels(self, live, col1, col2, col3, cmd, full, c1, c2, c3):
         """Three bordered panels across the full width.
@@ -2184,9 +2283,12 @@ class Console:
         # The SAME section names as the rail. The two placements show the
         # same three groups; calling them different things in each made a
         # reader learn the layout twice.
-        rows.append((f"╭{hdr('Model', c1)}┬{hdr('This turn', c2)}"
-                     f"┬{hdr('Session', c3)}╮",
-                     curses.A_BOLD | curses.color_pair(6)))
+        rows.append(([(f"╭{hdr('Model', c1)}",
+                       curses.A_BOLD | curses.color_pair(4)),
+                      (f"┬{hdr('This Turn', c2)}",
+                       curses.A_BOLD | curses.color_pair(2)),
+                      (f"┬{hdr('Session', c3)}╮",
+                       curses.A_BOLD | curses.color_pair(5))], 0))
         def spans_of(cell, width, base=0):
             """A column cell -> [(text, attr)] padded to exactly `width`."""
             if cell is None:
@@ -2277,14 +2379,15 @@ class Console:
         inner = max(8, W - 6)
         edge = curses.color_pair(8)
 
-        def top(text):
+        def top(text, accent):
             # "╭─ " + title + " " + rule + "─╮" is six cells of chrome, so
             # the rule is what is left after the title and those six, less
             # the two the closing "─╮" already counts.
             fill = max(1, inner - dwidth(text) - 2)
-            return ([("╭─ ", edge),
-                     (text, curses.A_BOLD | curses.color_pair(6)),
-                     (" " + "─" * fill + "─╮", edge)], 0)
+            color = curses.color_pair(accent)
+            return ([("╭─ ", color),
+                     (text, curses.A_BOLD | color),
+                     (" " + "─" * fill + "─╮", color)], 0)
 
         def bottom():
             return ([("╰" + "─" * (inner + 2) + "╯", edge)], 0)
@@ -2315,12 +2418,21 @@ class Console:
         # Wrapped to the box. A live row is a sentence, not a label and a
         # value, so the label/value fallback below cannot split it — without
         # wrapping here it ran straight through the right border.
-        live_sec = [[(piece, a)]
-                    for t, a in live
-                    for piece in (self._wrap(t.strip(), inner, "") or [""])] \
-            or [[("nothing in flight", 0)]]
-        for title, col in (("In flight", live_sec), ("This turn", col2),
-                           ("Session", col3), ("Model", col1)):
+        # The live card has a fixed footprint from the first draw. Previously
+        # it grew to fit wrapped request text and remembered its largest-ever
+        # height, so a long request permanently pushed the useful metrics
+        # below it. A dashboard card should not change geometry as content
+        # arrives: show at most two concise lines and clip each to the card.
+        live_lines = [t.strip() for t, _a in live if t.strip()]
+        if not live_lines:
+            live_lines = ["nothing in flight"]
+        live_sec = [[(fit("  " + line, max(1, inner - 2)),
+                      curses.color_pair(3) if live_lines[0] != "nothing in flight" else 0)]
+                    for line in live_lines[:2]]
+        live_sec += [[("", 0)]] * (2 - len(live_sec))
+        for title, col, accent in (("In flight", live_sec, 3),
+                                   ("This turn", col2, 2),
+                                   ("Session", col3, 5), ("Model", col1, 4)):
             if not col:
                 continue
             # Build the section first. A heading with nothing under it is
@@ -2328,13 +2440,17 @@ class Console:
             # Model column, so "Model" was printing as a bare word.
             section = []
             keeping = title == "In flight"      # it has no label column
+            metric = ""
             for cell in col:
                 if title != "In flight" and isinstance(cell, list) \
                         and cell and cell[0][0].strip():
                     # RAIL_KEEP names METRICS. The live section has none —
                     # its rows are sentences — so filtering it by that list
                     # dropped every one of them.
-                    keeping = cell[0][0].strip() in self.RAIL_KEEP
+                    metric = cell[0][0].strip()
+                    keeping = metric in self.RAIL_KEEP
+                    if keeping and section:
+                        section.append((" ", 0))
                 if not keeping:
                     continue
                 if cell is None:
@@ -2345,6 +2461,11 @@ class Console:
                     # A continuation row — blank label, value only. It kept
                     # the label column's padding, which in a rail left the
                     # value stranded sixteen spaces from the edge.
+                    # Keep the context-window denominator beside its gauge;
+                    # the other continuation rows repeat token counts or
+                    # elapsed seconds and make the rail read like a report.
+                    if title != "In flight" and metric != "Context":
+                        continue
                     body = "".join(t for t, _ in cell).strip()
                     for piece in self._wrap(body, max(8, inner - 2), ""):
                         section.append(([("  " + piece, cell[-1][1])], 0))
@@ -2372,21 +2493,12 @@ class Console:
             # No blank between boxes: the borders already separate them, and
             # a gap as well spends rows the rail does not have.
             body = [boxed(r) for r in section if r != ("", 0)]
-            # A box never shrinks once it has been a given height. A metric
-            # with no data yet has no row, so a box that gains one pushes
-            # everything under it down; padding to the tallest it has been
-            # means that happens at most once per section per session rather
-            # than on every poll.
-            # Created on demand: every test fixture builds a Console with
-            # __new__ and sets its state by hand, so new state that only
-            # __init__ knows about is missing there.
-            seen_h = getattr(self, "_rail_h", None)
-            if seen_h is None:
-                seen_h = self._rail_h = {}
-            tall = max(len(body), seen_h.get(title, 0))
-            seen_h[title] = tall
-            body += [boxed(("", 0))] * (tall - len(body))
-            rows.append(top(title))
+            # The live card already has a fixed number of rows. Other cards
+            # are built from stable metric skeletons, so their geometry does
+            # not need stateful "largest seen" padding either.
+            shown_title = {"In flight": "In Flight",
+                           "This turn": "This Turn"}.get(title, title)
+            rows.append(top(shown_title, accent))
             rows.extend(body)
             rows.append(bottom())
         return rows
@@ -2427,7 +2539,7 @@ class Console:
         """Columns the right-hand rail occupies, or 0 when it is elsewhere."""
         if self.stats_where() != "right":
             return 0
-        return max(24, min(34, self.scr.getmaxyx()[1] // 4))
+        return max(28, min(40, self.scr.getmaxyx()[1] // 4))
 
     def dash_h(self):
         return len(self.dash(self.scr.getmaxyx()[1]))
@@ -2550,7 +2662,9 @@ class Console:
         scr = self.scr
         self.fill(0, 0, W - 1)
         try:
-            scr.addnstr(0, LEFT, FILTER_LABEL, W - 1 - LEFT,
+            scr.addnstr(0, LEFT, APP_TITLE, dwidth(APP_TITLE),
+                        panelise(curses.color_pair(4)) | curses.A_BOLD)
+            scr.addnstr(0, FILTER_X, FILTER_LABEL, W - 1 - FILTER_X,
                         curses.color_pair(18))
         except curses.error:
             pass
@@ -2576,7 +2690,7 @@ class Console:
         self.fill(HEADER_H - 1, 0, W - 1)
         try:
             scr.addnstr(HEADER_H - 1, 0, "─" * (W - 1), W - 1,
-                        panelise(curses.color_pair(6)))
+                        panelise(curses.color_pair(4)))
         except curses.error:
             pass
 
@@ -2613,7 +2727,8 @@ class Console:
         if ri_here is not None:
             nm, bg = getattr(self, "_rec_name", {}).get(ri_here, (None, False))
             if nm:
-                crumb = f" · in #{ri_here + 1} {nm}" + (" ⟨BACKGROUND⟩" if bg else "")
+                crumb = (f" · in #{ri_here + 1} {display_name(nm)}"
+                         + (" ⟨BACKGROUND⟩" if bg else ""))
         # The crumb used to be written to row H-2 and then painted over by the
         # status bar on the same row, so which exchange you were looking at —
         # and whether it was a background request — was never visible. It is
@@ -2629,7 +2744,7 @@ class Console:
                 self.fill(y, W - rw - 1, rw)
                 try:
                     scr.addnstr(y, W - rw - 1, "│", 1,
-                                panelise(curses.color_pair(6)))
+                                panelise(curses.color_pair(4)))
                 except curses.error:
                     pass
         if where == "bottom":
@@ -2638,7 +2753,7 @@ class Console:
                 self.fill(y, 0, W - 1)
             try:
                 scr.addnstr(vh + HEADER_H, 0, "─" * (W - 1), W - 1,
-                            panelise(curses.color_pair(6)))
+                            panelise(curses.color_pair(4)))
             except curses.error:
                 pass
         panel = (self.dash(rw) if where == "right" and rw
@@ -2695,14 +2810,36 @@ class Console:
 
         pos = ("FOLLOWING" if self.follow
                else f"line {self.top+1}/{max(1, len(self.lines))}")
-        bar = (f" tool calls {'RAW' if self.opts.get('rawjson') else 'readable'} │ "
-               f"repeats {'SHOWN' if self.opts.get('repeats') else 'hidden'} │ "
-               f"thinking {'FOLDED' if self.opts.get('fold_thinking') else 'full'} │ "
-               f"{pos}{getattr(self, '_crumb', '')} ")
+        state = "FOLLOWING" if self.follow else pos
+        status = [
+            (f" {state} ", panelise(curses.color_pair(2 if self.follow else 4))
+             | curses.A_BOLD),
+            ("│", panelise(curses.color_pair(8))),
+            (f"  Tool Calls {'RAW' if self.opts.get('rawjson') else 'Readable'}  ",
+             panelise(curses.color_pair(6))),
+            ("│", panelise(curses.color_pair(8))),
+            (f"  Repeats {'SHOWN' if self.opts.get('repeats') else 'Hidden'}  ",
+             panelise(curses.color_pair(6))),
+            ("│", panelise(curses.color_pair(8))),
+            (f"  Thinking {'FOLDED' if self.opts.get('fold_thinking') else 'Full'}  ",
+             panelise(curses.color_pair(6))),
+        ]
+        crumb = getattr(self, "_crumb", "")
+        if crumb:
+            status.extend([("│", panelise(curses.color_pair(8))),
+                           (crumb.strip(), panelise(curses.color_pair(4)))])
         if self.busy:
-            bar += f"│ {self.busy} "
+            status.extend([("│", panelise(curses.color_pair(8))),
+                           (f" {self.busy} ", panelise(curses.color_pair(3))
+                            | curses.A_BOLD)])
+        self.fill(H - 2, 0, W - 1)
+        x = 1
         try:
-            scr.addnstr(H - 2, 0, bar.ljust(W - 1), W - 1, curses.A_REVERSE)
+            for text, attr in status:
+                if x >= W - 1:
+                    break
+                scr.addnstr(H - 2, x, text, min(dwidth(text), W - 1 - x), attr)
+                x += dwidth(text)
         except curses.error:
             pass
 
