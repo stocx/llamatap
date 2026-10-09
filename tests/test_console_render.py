@@ -4023,3 +4023,40 @@ class RailSectionsAreGrouped(TapTest):
             with self.subTest(party=party):
                 self.assertEqual(c.chip_at(x0), party,
                                  "the mark is outside the click target")
+
+    def test_the_funnel_sits_after_the_name(self):
+        """Where a column filter sits in every table that has one."""
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen()
+        c.chips = C.Console.build_chips(c, "opencode", "llama-server", "qwen")
+        c.show = set(C.PARTIES)
+        cells = [[" "] * 140 for _ in range(2)]
+
+        class Scr(Screen):
+            def addnstr(self, y, x, t, n, a=0):
+                for ch in t[:max(0, n)]:
+                    if x >= 140:
+                        return
+                    cells[y][x] = ch
+                    x += 1
+
+        c.scr = Scr(); c.fill = lambda *a: None
+        c.draw_header(140)
+        head = "".join(cells[0])
+        for party, label, _x0, _x1 in c.chips:
+            with self.subTest(party=party):
+                self.assertIn(f"{label} {C.FILTER_ON}", head,
+                              f"the funnel is not after {label!r}: {head!r}")
+
+    def test_the_funnel_is_one_cell_in_both_states(self):
+        """A state change that shifts the row is a flicker, not a signal."""
+        for g in (self.C.FILTER_ON, self.C.FILTER_OFF):
+            with self.subTest(glyph=g):
+                self.assertEqual(self.C.dwidth(g), 1)
+        self.assertNotEqual(self.C.FILTER_ON, self.C.FILTER_OFF)

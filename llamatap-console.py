@@ -235,9 +235,14 @@ PARTIES = ("you", "harness", "server", "model")
 #: The header row is a control, so it says so. "in this thread:" described
 #: the row; "Filter" says what clicking a name does.
 FILTER_LABEL = "Filter:"
-#: Shown / hidden, as a mark rather than only as a dimmed colour — which a
-#: low-contrast theme loses entirely.
-FILTER_ON, FILTER_OFF = "\u25c9", "\u25cb"
+#: The funnel, which is what a filter control looks like everywhere else.
+#: Filled while the party is showing, hollow once it is filtered out — the
+#: same icon in two states, so it reads as one control rather than two
+#: symbols. It sits AFTER the name, where a column filter sits in every table
+#: that has one.
+#:
+#: Both are east_asian_width A, so one cell each.
+FILTER_ON, FILTER_OFF = "\u25bc", "\u25bd"
 
 #: Rows the pinned header occupies: the party row, and a rule under it.
 #: Named so everything that has to agree — view_h(), the draw offset,
@@ -1039,7 +1044,7 @@ class Console:
                              ("server", server), ("model", model)):
             # The mark is part of the click target: it is the affordance, so
             # clicking it has to do what it advertises.
-            shown = f"{FILTER_ON} {label}"
+            shown = f"{label} {FILTER_ON}"
             out.append((party, label, x, x + dwidth(shown)))
             x += dwidth(shown) + 3
         return out
@@ -2341,7 +2346,7 @@ class Console:
             # A filled box when the party is showing, an empty one when it is
             # not — the state is in the mark, not only in the dimness, which
             # a colour-blind reader or a low-contrast theme can lose.
-            shown = f"{FILTER_ON if on else FILTER_OFF} {label}"
+            shown = f"{label} {FILTER_ON if on else FILTER_OFF}"
             try:
                 scr.addnstr(0, x0, shown, W - 1 - x0, attr)
             except curses.error:

@@ -108,7 +108,7 @@ per-exchange headers. Every message appears where it happened; a `+` opens
 structure in place.
 
 ```
-  Filter:  ◉ you   ◉ opencode   ◉ llama-server b11040   ◯ qwen3.5-35b-moe
+  Filter:  you ▼   opencode ▼   llama-server b11040 ▼   qwen3.5-35b-moe ▽
 
   opencode → prompting                    45,724 chars · ~11,431 tokens · 11.4s prefill
   ▌ + system prompt   23,022 chars · 50% of the request
@@ -141,8 +141,8 @@ need a timezone; only the display is converted.
 
 The four participants are a **pinned row**, not the first line of the
 transcript — they used to scroll away, and they are now the filter control.
-It is labelled `Filter:` and each name carries its own state: `◉` showing,
-`◯` hidden. The mark matters because dimness alone is lost on a low-contrast
+It is labelled `Filter:` and each name carries a funnel: `▼` showing,
+`▽` hidden. The mark matters because dimness alone is lost on a low-contrast
 theme, and it sits inside the click target, since it is the affordance.
 
 **Click a name to show or hide that party.** All four are on by default; a
