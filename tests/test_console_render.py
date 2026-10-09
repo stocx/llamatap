@@ -255,11 +255,22 @@ class StatsRail(TapTest):
                                  f"{label} is not in RAIL_KEEP but reached "
                                  f"the rail")
 
-    def test_the_rail_is_smaller_than_the_bottom_panel(self):
-        """If the slim view is not slimmer, it has no reason to exist."""
+    def test_the_rail_carries_fewer_metrics_than_the_bottom_panel(self):
+        """If the slim view is not slimmer, it has no reason to exist.
+
+        Measured in METRICS, not rows. The rail is slim in WIDTH — it is a
+        column with the whole screen height to use, while the bottom panel is
+        squeezed into a few rows at the foot. Comparing their row counts
+        compares two different constraints, and started failing the moment
+        the sections became boxes, which cost rows without adding anything to
+        read.
+        """
         rail = self.rail_text(self.console(40, 160, stats="right"))
         full = self.rail_text(self.console(40, 160, stats="bottom"), width=158)
-        self.assertLess(len(rail.split("\n")), len(full.split("\n")) + 12)
+        shown = [l for l in DASHBOARD_LABELS if l in rail]
+        every = [l for l in DASHBOARD_LABELS if l in full]
+        self.assertLess(len(shown), len(every),
+                        f"the rail is not a subset: {shown} vs {every}")
         self.assertNotIn("Memory Map", rail)
 
     def test_no_rail_row_exceeds_the_rail_width(self):
@@ -4021,6 +4032,66 @@ class RailSectionsAreGrouped(TapTest):
                 for r in rows:
                     self.assertLessEqual(self.C.dwidth(r), w,
                                          f"row wider than the rail: {r!r}")
+
+    def test_the_live_block_is_its_own_named_section(self):
+        """It used to be loose rows above the boxes with nothing saying what
+        they were."""
+        _w, rows = self.rail()
+        self.assertTrue(any("In flight" in r for r in rows),
+                        f"no In flight section: {rows[:3]}")
+
+    def test_an_idle_rail_still_shows_the_section(self):
+        """A box that vanishes when idle moves everything under it."""
+        _w, rows = self.rail()
+        i = next(i for i, r in enumerate(rows) if "In flight" in r)
+        self.assertIn("nothing in flight", rows[i + 1],
+                      "the idle state is blank rather than stated")
+
+    def test_the_sections_hold_their_row_when_a_request_arrives(self):
+        """Live rows appear and vanish as requests start and finish. With
+        them loose above the boxes, every box below shifted down and back up
+        again — the numbers you are trying to watch moved while you
+        watched them."""
+        import time as _t
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (50, 140)
+
+        shared = {}
+
+        def rows_for(inflight):
+            c = C.Console.__new__(C.Console)
+            c.scr = Screen(); c.recs = [a_record(i) for i in range(3)]
+            c.name = None; c.extra = []; c.follow = False; c.top = 0
+            c._rail_h = shared
+            c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                      "repeats": False, "fold_thinking": True,
+                      "stats": "right"}
+            c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+            c.menu = []; c.detail = None; c.node_bodies = {}
+            c.show = set(C.PARTIES); c.chips = []
+            c.inflight = inflight; c.inflight_reqs = {}
+            c.msg = ""; c.msg_until = 0; c.tick = 0
+            c.cmd = None; c.busy = ""
+            c._flags = ""; c._flags_started = True; c._flags_err = ""
+            c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+            c.rebuild()
+            return ["".join(x for x, _ in t) if isinstance(t, list) else t
+                    for t, _a in c.dash(c.rail_w())]
+
+        busy = rows_for([{"t0": _t.time(), "model": "q",
+                          "state": "decoding", "tokens": 9,
+                          "req_bytes": 100}])
+        idle = rows_for([])
+        for title in ("This turn", "Session"):
+            with self.subTest(title=title):
+                a = next(i for i, r in enumerate(busy) if title in r)
+                b = next(i for i, r in enumerate(idle) if title in r)
+                self.assertEqual(a, b,
+                                 f"{title} moved from row {a} to {b} when the "
+                                 f"request finished")
 
     def test_every_value_sits_inside_a_border(self):
         _w, rows = self.rail()

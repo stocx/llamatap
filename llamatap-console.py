@@ -885,6 +885,9 @@ class Console:
         #: built by rebuild() because only it knows the harness and model
         #: names, and read by draw().
         self.chips = []
+        #: Tallest each rail box has been, so it never shrinks under a metric
+        #: that comes and goes.
+        self._rail_h = {}
 
     # ------------------------------------------------------------- conversation
     # ------------------------------------------------------------ the tree
@@ -2228,21 +2231,41 @@ class Console:
             return ([("│ ", edge)] + list(cells)
                     + [(" " * gap + " │", edge)], 0)
 
-        rows = list(live)
+        rows = []
         # Current turn FIRST. A short window drops rows off the end, and with
         # Session leading, the numbers the rail exists to show — cache reuse,
         # prefill, decode — were the first to go.
-        for title, col in (("This turn", col2), ("Session", col3),
-                           ("Model", col1)):
+        # The live block is a section like any other, with a name that says
+        # what it is. It used to be loose rows above the boxes, and because
+        # they appear and vanish as requests start and finish, every box
+        # below shifted down and back up again — the numbers you are trying
+        # to watch moved while you watched them. Boxed and padded, it holds
+        # its place.
+        # A section row is a LIST of (text, attr) spans; a live row is one
+        # bare (text, attr) pair. Passing the pair straight through made the
+        # span loop unpack a string.
+        # Wrapped to the box. A live row is a sentence, not a label and a
+        # value, so the label/value fallback below cannot split it — without
+        # wrapping here it ran straight through the right border.
+        live_sec = [[(piece, a)]
+                    for t, a in live
+                    for piece in (self._wrap(t.strip(), inner, "") or [""])] \
+            or [[("nothing in flight", 0)]]
+        for title, col in (("In flight", live_sec), ("This turn", col2),
+                           ("Session", col3), ("Model", col1)):
             if not col:
                 continue
             # Build the section first. A heading with nothing under it is
             # worse than no heading, and RAIL_KEEP holds nothing from the
             # Model column, so "Model" was printing as a bare word.
             section = []
-            keeping = False
+            keeping = title == "In flight"      # it has no label column
             for cell in col:
-                if isinstance(cell, list) and cell and cell[0][0].strip():
+                if title != "In flight" and isinstance(cell, list) \
+                        and cell and cell[0][0].strip():
+                    # RAIL_KEEP names METRICS. The live section has none —
+                    # its rows are sentences — so filtering it by that list
+                    # dropped every one of them.
                     keeping = cell[0][0].strip() in self.RAIL_KEEP
                 if not keeping:
                     continue
@@ -2278,10 +2301,25 @@ class Console:
                                 section.append(([("  " + piece, a)], 0))
             if not any(r != ("", 0) for r in section):
                 continue
-            if rows and rows[-1] != ("", 0):
-                rows.append(("", 0))
+            # No blank between boxes: the borders already separate them, and
+            # a gap as well spends rows the rail does not have.
+            body = [boxed(r) for r in section if r != ("", 0)]
+            # A box never shrinks once it has been a given height. A metric
+            # with no data yet has no row, so a box that gains one pushes
+            # everything under it down; padding to the tallest it has been
+            # means that happens at most once per section per session rather
+            # than on every poll.
+            # Created on demand: every test fixture builds a Console with
+            # __new__ and sets its state by hand, so new state that only
+            # __init__ knows about is missing there.
+            seen_h = getattr(self, "_rail_h", None)
+            if seen_h is None:
+                seen_h = self._rail_h = {}
+            tall = max(len(body), seen_h.get(title, 0))
+            seen_h[title] = tall
+            body += [boxed(("", 0))] * (tall - len(body))
             rows.append(top(title))
-            rows.extend(boxed(r) for r in section if r != ("", 0))
+            rows.extend(body)
             rows.append(bottom())
         return rows
 
