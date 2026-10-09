@@ -1842,6 +1842,9 @@ class ExpandToggle(TapTest):
         recs_with_nodes = {nid[0] for (_l, _a, _b, nid) in c.hotspots}
         self.assertGreater(len(recs_with_nodes), 1,
                            "the fixture has nodes in only one exchange")
+        # Collapse, then expand: the first press on a default-open thread
+        # closes everything.
+        self.press_o(c)
         self.press_o(c)
         shut = [nid for (_l, _a, _b, nid) in c.hotspots if nid not in c.open]
         self.assertEqual(shut, [], f"{len(shut)} nodes left shut: {shut[:3]}")
@@ -1854,16 +1857,17 @@ class ExpandToggle(TapTest):
                              f"x is still documented: {line!r}")
 
     def test_it_toggles_back_and_forth(self):
+        """Nodes are open by default, so the first press COLLAPSES."""
         c = self.console()
-        shut = len(c.lines)
-        self.press_o(c)
         opened = len(c.lines)
-        self.assertGreater(opened, shut, "`o` did not expand anything")
         self.press_o(c)
-        self.assertEqual(len(c.lines), shut,
-                         "`o` did not collapse back to where it started")
+        shut = len(c.lines)
+        self.assertLess(shut, opened, "`o` did not collapse anything")
         self.press_o(c)
-        self.assertEqual(len(c.lines), opened, "the toggle is not repeatable")
+        self.assertEqual(len(c.lines), opened,
+                         "`o` did not expand back to where it started")
+        self.press_o(c)
+        self.assertEqual(len(c.lines), shut, "the toggle is not repeatable")
 
     def test_the_capital_is_the_same_key(self):
         src = open(os.path.join(ROOT, "llamatap-console.py")).read()
@@ -2207,40 +2211,53 @@ class ExpandAllReachesEverything(TapTest):
     def kinds(self, c):
         return {nid[1] for (_l, _a, _b, nid) in c.hotspots}
 
-    def test_the_tools_container_is_opened(self):
+    def test_the_tools_container_is_open(self):
+        """An earlier expand-all collected each individual tool but never the
+        `+ N tools` CONTAINER they live inside, so it opened the children of
+        a node it left shut and the list stayed invisible."""
         c = self.console()
         self.assertIn("tools", self.kinds(c), "the fixture has no tools node")
-        c.toggle_expand_all(); c.rebuild()
-        opened = {nid[1] for nid in c.open}
-        self.assertIn("tools", opened,
-                      "expand-all left the tools container shut")
+        self.assertIn("tools", {nid[1] for nid in c.open},
+                      "the tools container is shut")
 
-    def test_the_tool_list_actually_appears(self):
-        """The observable consequence, not just the flag."""
+    def test_the_tool_list_is_visible_by_default(self):
+        """Nodes are open by default — seeing the structure is the point of
+        the tree, and a thread that arrives collapsed makes you click through
+        it before it tells you anything."""
         c = self.console()
-        before = len(c.lines)
-        c.toggle_expand_all(); c.rebuild()
-        self.assertGreater(len(c.lines), before,
+        self.assertIn("tool", self.kinds(c),
+                      "individual tools are not visible without pressing o")
+
+    def test_expanding_after_a_collapse_brings_them_back(self):
+        c = self.console()
+        c.toggle_expand_all(); c.rebuild()          # collapse
+        shut = len(c.lines)
+        c.toggle_expand_all(); c.rebuild()          # expand
+        self.assertGreater(len(c.lines), shut,
                            "expand-all revealed nothing")
         self.assertIn("tool", self.kinds(c),
-                      "individual tools never became visible")
+                      "individual tools never came back")
 
-    def test_nested_nodes_revealed_by_opening_a_parent_are_opened_too(self):
+    def test_nothing_is_left_shut(self):
         """A container reveals nodes that did not exist a moment before, so
-        one pass is not enough."""
+        one pass is not enough — on the default open, and on a re-expand."""
         c = self.console()
-        c.toggle_expand_all(); c.rebuild()
-        here = [nid for (_l, _a, _b, nid) in c.hotspots if nid[0] == 0]
-        shut = [nid for nid in here if nid not in c.open]
-        self.assertEqual(shut, [], f"{len(shut)} nodes left shut: {shut[:3]}")
+        shut = [nid for (_l, _a, _b, nid) in c.hotspots if nid not in c.open]
+        self.assertEqual(shut, [], f"shut by default: {shut[:3]}")
+        c.toggle_expand_all(); c.rebuild()          # collapse
+        c.toggle_expand_all(); c.rebuild()          # expand
+        shut = [nid for (_l, _a, _b, nid) in c.hotspots if nid not in c.open]
+        self.assertEqual(shut, [], f"shut after re-expanding: {shut[:3]}")
 
     def test_it_collapses_back(self):
+        """Nodes are OPEN by default now, so the cycle starts expanded:
+        collapse, then expand, and the height returns."""
         c = self.console()
-        shut = len(c.lines)
+        wide = len(c.lines)
         c.toggle_expand_all(); c.rebuild()
-        self.assertGreater(len(c.lines), shut)
+        self.assertLess(len(c.lines), wide, "nothing collapsed")
         c.toggle_expand_all(); c.rebuild()
-        self.assertEqual(len(c.lines), shut, "collapse did not undo expand")
+        self.assertEqual(len(c.lines), wide, "expand did not undo collapse")
 
     def test_it_terminates_on_a_pathological_tree(self):
         """The loop is bounded: a node generator that never settles must not
@@ -4414,11 +4431,11 @@ class BothPlacementsAgree(TapTest):
         text = "\n".join("".join(x for x, _ in t) if isinstance(t, list) else t
                          for t, _a in c.dash(168))
         col3 = self.columns(text)[3]
-        self.assertIn("90%", col3,
-                      f"1,800 of 2,000 reused is 90%: {col3}")
-        self.assertIn("1,800 reused, 200 new", col3)
-        self.assertNotIn("-", col3.split("reused")[0][-14:],
-                         "a negative count of new tokens")
+        # 90%, not 2,063% — the discriminator for the denominator bug. The
+        # "reused / new" line is gone: the rate is the reading, and the raw
+        # counts were words where a number would do.
+        self.assertIn("90%", col3, f"1,800 of 2,000 reused is 90%: {col3}")
+        self.assertNotIn("2,063", col3, "divided by the evaluated tokens")
 
     def test_the_thinking_share_appears_when_the_model_thought(self):
         """A thread whose window is 40% reasoning it has finished with is a
@@ -4457,8 +4474,8 @@ class BothPlacementsAgree(TapTest):
                          for t, _a in c.dash(168))
         col3 = self.columns(text)[3]
         self.assertIn("Thinking", col3, "no thinking share at all")
-        self.assertIn("tokens in context", col3,
-                      "the share is stated without its basis")
+        self.assertRegex(col3, r"\d+ / [\d,]+ tokens",
+                         "the share is stated without its basis")
 
     def test_the_thinking_row_exists_before_there_is_any(self):
         """The panel is a fixed SKELETON: every section and every row exists
@@ -4535,3 +4552,71 @@ class BothPlacementsAgree(TapTest):
                               f"{title} is missing before any traffic")
         self.assertNotIn("waiting for the first request", text,
                          "the old placeholder is back")
+
+
+class ShorterStatLabels(TapTest):
+    """Fewer words where a symbol says the same thing, and a rate that never
+    claims a milestone it has not reached."""
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def test_a_rate_below_one_never_reads_one_hundred(self):
+        """13,219 of 13,254 is 99.7%, which `.0f` printed as "100%" —
+        directly contradicting the "35 new" beside it."""
+        self.assertEqual(self.C.pct(13219 / 13254), "99%")
+        self.assertEqual(self.C.pct(0.999), "99%")
+        self.assertEqual(self.C.pct(1.0), "100%")
+
+    def test_the_ends_are_exact(self):
+        self.assertEqual(self.C.pct(0), "0%")
+        self.assertEqual(self.C.pct(None), "0%")
+        self.assertEqual(self.C.pct(0.5), "50%")
+
+    def test_it_is_bounded(self):
+        """A cache count larger than the prompt is a bug upstream, not a
+        reason to print 2,063%."""
+        self.assertEqual(self.C.pct(20.6), "100%")
+        self.assertEqual(self.C.pct(-1), "0%")
+
+    def panel(self):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (60, 170)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(i) for i in range(3)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c._rail_h = {}
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "bottom"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.inflight_reqs = {}
+        c.msg = ""; c.msg_until = 0; c.tick = 0; c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        return "\n".join("".join(x for x, _ in t) if isinstance(t, list) else t
+                         for t, _a in c.dash(168))
+
+    def test_rates_use_an_at_sign(self):
+        text = self.panel()
+        self.assertRegex(text, r"tokens @ ", "rates still spell out 'at'")
+        self.assertNotIn("tokens at ", text)
+
+    def test_ratios_use_a_slash(self):
+        text = self.panel()
+        self.assertNotRegex(text, r"\d of [\d,]+ tokens",
+                            "ratios still spell out 'of'")
+
+    def test_the_cache_row_is_just_the_rate(self):
+        """The percentage IS the reading; the raw counts were words where a
+        number would do."""
+        text = self.panel()
+        self.assertIn("KV cache hits", text)
+        self.assertNotIn("reused,", text, "the raw counts are still there")

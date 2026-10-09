@@ -853,6 +853,18 @@ def fit(text, width):
     return "".join(out) + " " * max(0, width - w)
 
 
+def pct(frac):
+    """A percentage that never rounds UP to a milestone it has not reached.
+
+    13,219 of 13,254 is 99.7%, which `.0f` prints as "100%" — directly
+    contradicting the "35 new" beside it. Floored, so 100% means 100%.
+    """
+    # int() floors, which is the whole mechanism: 0.997 becomes 99, and 100
+    # is reachable only from exactly 1.0. A guard for "rounded up to 100 but
+    # is not 100" was dead code — `%.0f` was what rounded, and it is gone.
+    return f"{int(max(0.0, min(1.0, frac or 0)) * 100)}%"
+
+
 def meter(frac, n):
     """`░` renders as a near-solid block in several terminal fonts, which makes
     an EMPTY bar look full. `·` cannot be misread."""
@@ -1101,6 +1113,20 @@ class Console:
         line up under the speaker, not under the timestamp.
         """
         nid = (rec_i, kind, key)
+        # Open by default. Seeing the structure is the point of the tree; a
+        # thread that arrives entirely collapsed makes you click through it
+        # before it tells you anything. A node you have closed BY HAND is in
+        # `touched`, and stays closed.
+        touched = getattr(self, "touched", None)
+        if touched is None:
+            touched = self.touched = set()
+        # `/thinking close` is a deliberate default for one kind of node, so
+        # the blanket default must not override it — the caller has already
+        # decided for thinking, and re-opening it here broke folding
+        # entirely.
+        folded = kind == "thinking" and self.opts.get("fold_thinking")
+        if nid not in touched and not folded:
+            self.open.add(nid)
         open_ = nid in self.open
         sign = "−" if open_ else "+"
         pad = "   " * (depth - 1)
@@ -1951,15 +1977,13 @@ class Console:
         col2.append([(pad("KV cache hits", L), curses.color_pair(6)),
                      (meter(fr, max(6, min(12, c2 - L - 7))),
                       bar_c | curses.A_BOLD),
-                     (f" {fr*100:.0f}%", bar_c)])
-        col2.append(kv("", f"{cached or 0:,} reused, "
-                          f"{max(0, (pt or 0) - (cached or 0)):,} new"))
+                     (f" {pct(fr)}", bar_c)])
         col2.append(kv("Prefill",
-                       f"{tm.get('prompt_n', 0):,} tokens at "
+                       f"{tm.get('prompt_n', 0):,} tokens @ "
                        f"{tm.get('prompt_per_second', 0):,.0f}/sec"))
         col2.append(kv("", f"{tm.get('prompt_ms', 0)/1000:.2f} seconds"))
         col2.append(kv("Decode",
-                       f"{tm.get('predicted_n', 0) or ct or 0:,} tokens at "
+                       f"{tm.get('predicted_n', 0) or ct or 0:,} tokens @ "
                        f"{tm.get('predicted_per_second', 0):.1f}/sec",
                        curses.color_pair(3)))
         col2.append(kv("", f"{tm.get('predicted_ms', 0)/1000:.2f} seconds"))
@@ -2038,18 +2062,17 @@ class Console:
         bar_c = curses.color_pair(2 if fr < 0.7 else 3 if fr < 0.9 else 1)
         col3.append([(pad("Context", S), curses.color_pair(6)),
                      (meter(fr, bw), bar_c | curses.A_BOLD),
-                     (f" {fr*100:.0f}%", bar_c)])
-        col3.append(kv3("", f"{pt or 0:,} of {limit:,} tokens" if limit
-                            else f"{pt or 0:,} tokens, window size unknown"))
+                     (f" {pct(fr)}", bar_c)])
+        col3.append(kv3("", f"{pt or 0:,} / {limit:,} tokens" if limit
+                            else f"{pt or 0:,} tokens, window unknown"))
         # Thinking as a share of the window. SESSION only: a single turn's
         # thinking says nothing about what the context is carrying.
         if True:
             fr = (think_tok / pt) if (think_tok and pt) else 0.0
             col3.append([(pad("Thinking", S), curses.color_pair(6)),
                          (meter(fr, bw), curses.color_pair(3) | curses.A_BOLD),
-                         (f" {fr*100:.0f}%", curses.color_pair(3))])
-            col3.append(kv3("", f"{think_tok:,} of {pt or 0:,} tokens "
-                                f"in context"))
+                         (f" {pct(fr)}", curses.color_pair(3))])
+            col3.append(kv3("", f"{think_tok:,} / {pt or 0:,} tokens"))
         if level:
             col3.append(kv3("", f"thinking level: {level}"))
         col3 += [kv3("Requests", f"{len(self.recs):,}"),
@@ -2063,16 +2086,14 @@ class Console:
         bar_c = curses.color_pair(2 if fr > 0.5 else 3)
         col3.append([(pad("KV cache hits", S), curses.color_pair(6)),
                      (meter(fr, bw), bar_c | curses.A_BOLD),
-                     (f" {fr*100:.0f}%", bar_c)])
-        col3.append(kv3("", f"{hit_tok:,} reused, "
-                            f"{max(0, seen_tok - hit_tok):,} new"))
+                     (f" {pct(fr)}", bar_c)])
         col3.append(kv3("Prefill",
-                        f"{pre_tok:,} tokens at "
+                        f"{pre_tok:,} tokens @ "
                         f"{(pre_tok / (pre_ms/1000)) if pre_ms else 0:,.0f}"
                         f"/sec"))
         col3.append(kv3("", f"{pre_ms/1000:.2f} seconds"))
         col3.append(kv3("Decode",
-                        f"{dec_tok:,} tokens at "
+                        f"{dec_tok:,} tokens @ "
                         f"{(dec_tok / (dec_ms/1000)) if dec_ms else 0:.1f}"
                         f"/sec", curses.color_pair(3)))
         col3.append(kv3("", f"{dec_ms/1000:.2f} seconds"))
