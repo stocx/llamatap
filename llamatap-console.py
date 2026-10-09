@@ -232,6 +232,13 @@ PANEL_CODE = {"\033[31m": "\033[106m", "\033[32m": "\033[101m",
 #: "<harness> → tool result" rather than attributed to the user.
 PARTIES = ("you", "harness", "server", "model")
 
+#: The header row is a control, so it says so. "in this thread:" described
+#: the row; "Filter" says what clicking a name does.
+FILTER_LABEL = "Filter:"
+#: Shown / hidden, as a mark rather than only as a dimmed colour — which a
+#: low-contrast theme loses entirely.
+FILTER_ON, FILTER_OFF = "\u25c9", "\u25cb"
+
 #: Rows the pinned header occupies: the party row, and a rule under it.
 #: Named so everything that has to agree — view_h(), the draw offset,
 #: hotspot_at(), the rail and the clipping threshold — cannot drift. Changing
@@ -1027,11 +1034,14 @@ class Console:
         click target and the drawn text then cannot disagree, which is the way
         a hand-placed label and a hand-placed hotspot always eventually do.
         """
-        out, x = [], LEFT + dwidth("in this thread:") + 2
+        out, x = [], LEFT + dwidth(FILTER_LABEL) + 2
         for party, label in (("you", "you"), ("harness", harness),
                              ("server", server), ("model", model)):
-            out.append((party, label, x, x + dwidth(label)))
-            x += dwidth(label) + 3
+            # The mark is part of the click target: it is the affordance, so
+            # clicking it has to do what it advertises.
+            shown = f"{FILTER_ON} {label}"
+            out.append((party, label, x, x + dwidth(shown)))
+            x += dwidth(shown) + 3
         return out
 
     def party_of(self, m):
@@ -1667,6 +1677,15 @@ class Console:
                 # and the actual instruction sits above it. The console then
                 # replayed "hello" as though it were a fresh prompt and never
                 # showed the request that had been made.
+                # The same consecutive-user rule the completed thread uses:
+                # two user turns in a row with no reply between them means
+                # the harness prepended context. Applied here too, or the
+                # live view says "you" twice for a request where you typed
+                # once.
+                for k in range(len(turns) - 1):
+                    if turns[k].get("who") == "you" \
+                            and turns[k + 1].get("who") == "you":
+                        turns[k] = dict(turns[k], who="harness")
                 asked = [(t.get("who"), t.get("text") or "") for t in turns
                          if (t.get("text") or "").strip() not in already]
             # Attribution uses the SAME structural test the completed thread
@@ -1699,7 +1718,13 @@ class Console:
                 # The size and state sit on the FIRST row only; repeating
                 # them on each turn would claim each one cost that much.
                 stat = note if k == 0 else ""
-                lbl = f"{' ' * LEFT}{name} {sp}"
+                # A spinner only where something is actually moving. These
+                # rows are what was SENT: finished, sitting in the request.
+                # A spinner on the harness's row while the MODEL thinks says
+                # the harness is working, which it is not. The exception is
+                # the bare "sending" row, which appears when there is nothing
+                # to show yet — during prefill it is the only sign of life.
+                lbl = f"{' ' * LEFT}{name}" + (f" {sp}" if text is None else "")
                 gap = " " * max(2, W - dwidth(lbl) - dwidth(stat) - 3)
                 self.emit(f"{col_}{lbl}{C_OFF}{gap}{C_DIM}{stat}{C_OFF}")
                 if text:
@@ -2079,7 +2104,12 @@ class Console:
     def _dash_rail(self, live, col1, col2, col3, cmd, W):
         """A narrow vertical rail: the same cells, filtered and stacked."""
         def heading(text):
-            return ([(text, curses.A_BOLD | curses.color_pair(6))], 0)
+            # A rule to the right of the title, so each section reads as a
+            # group with its numbers under it rather than as one long column
+            # of figures with occasional bold words in it.
+            pad = max(1, W - 2 - dwidth(text) - 1)
+            return ([(text, curses.A_BOLD | curses.color_pair(6)),
+                     (" " + "─" * pad, curses.color_pair(8))], 0)
 
         rows = list(live)
         # Current turn FIRST. A short window drops rows off the end, and with
@@ -2296,7 +2326,7 @@ class Console:
         scr = self.scr
         self.fill(0, 0, W - 1)
         try:
-            scr.addnstr(0, LEFT, "in this thread:", W - 1 - LEFT,
+            scr.addnstr(0, LEFT, FILTER_LABEL, W - 1 - LEFT,
                         curses.color_pair(18))
         except curses.error:
             pass
@@ -2308,8 +2338,12 @@ class Console:
             attr |= curses.A_BOLD if on else curses.A_DIM
             if not on:
                 attr = curses.color_pair(18) | curses.A_DIM
+            # A filled box when the party is showing, an empty one when it is
+            # not — the state is in the mark, not only in the dimness, which
+            # a colour-blind reader or a low-contrast theme can lose.
+            shown = f"{FILTER_ON if on else FILTER_OFF} {label}"
             try:
-                scr.addnstr(0, x0, label, W - 1 - x0, attr)
+                scr.addnstr(0, x0, shown, W - 1 - x0, attr)
             except curses.error:
                 pass
         # A rule under it. The header is a filled panel and so is every block
@@ -2777,6 +2811,9 @@ class Console:
         show = set(PARTIES) if show is None else show
         names = [label if party in show else f"({label})"
                  for party, label, _x0, _x1 in chips]
+        # The COPY keeps prose. It is a document someone reads later,
+        # not a control they can click, so "Filter:" would describe a
+        # thing that is not there.
         line = "in this thread:  " + "   ".join(names)
         if any(party not in show for party, _l, _a, _b in chips):
             # Say it in the copy itself. A filtered buffer that looks

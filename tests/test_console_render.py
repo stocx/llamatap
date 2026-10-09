@@ -1334,7 +1334,7 @@ class PartyFilter(TapTest):
 
                 c.scr = Screen(); c.top = top
                 c.draw()
-                self.assertIn("in this thread", "".join(cells[0]),
+                self.assertIn(self.C.FILTER_LABEL, "".join(cells[0]),
                               "the transcript was drawn over the header")
                 # and the first transcript row is still on screen below it
                 first = "".join(ch for _c, ch, _a in c.lines[top]) \
@@ -2458,6 +2458,30 @@ class InFlightHoldsItsPlace(TapTest):
                           "a placeholder with no request in flight")
         self.assertEqual(c._live_lines, 0)
 
+    def test_no_spinner_on_what_was_already_sent(self):
+        """A spinner on the harness's row while the MODEL thinks says the
+        harness is working, which it is not. Those rows are finished content
+        sitting in the request."""
+        # This class's fixture predates in-flight requests, so it publishes
+        # none — and with nothing to show the bare "sending" row keeps its
+        # spinner, correctly. The rule under test is about rows that carry
+        # SENT CONTENT, so the request has to be supplied.
+        c = self.console(job={"key": "k1", "model": "qwen", "req_bytes": 100,
+                              "state": "decoding", "thinking": "weighing it"})
+        c.inflight_reqs = {"k1": {"model": "q", "messages": [
+            {"role": "system", "content": "# Tone\nbe terse"},
+            {"role": "user", "content": "a brand new question"}]}}
+        c.rebuild()
+        rows = self.rows(c)
+        sent = next(l for l in rows if "a brand new question" in l)
+        sent = rows[rows.index(sent) - 1]
+        for frame in self.C.SPIN:
+            self.assertNotIn(frame, sent,
+                             f"a spinner on an already-sent row: {sent!r}")
+        live = next(l for l in rows if "thinking" in l)
+        self.assertTrue(any(f in live for f in self.C.SPIN),
+                        f"no spinner on the row that is moving: {live!r}")
+
     def test_a_tool_call_being_written_is_visible(self):
         """A tool call streams as argument fragments, which neither `content`
         nor `reasoning_content` ever carries. Without them the console showed
@@ -2606,7 +2630,7 @@ class BlocksStartAtTheLeftEdge(TapTest):
         self.assertGreater(rule.count("─"), cols // 2,
                            f"no rule under the header: {rule[:40]!r}")
         names = "".join(cells[0])
-        self.assertIn("in this thread", names,
+        self.assertIn(self.C.FILTER_LABEL, names,
                       "the rule was drawn over the party names")
 
     def test_the_header_height_accounts_for_the_rule(self):
@@ -3494,6 +3518,26 @@ class TheQuestionIsVisibleWhileAnswered(TapTest):
                          f"the user's own message is attributed elsewhere: "
                          f"{head!r}")
 
+    def test_injected_context_is_not_you_in_flight_either(self):
+        """Two user turns in a row with no reply between them means the
+        harness prepended context. Without this the live view said "you"
+        twice for a request where the user typed once."""
+        # The SAME system prompt as the completed record, so this is a main
+        # thread turn and not a side-call. With a different prompt everything
+        # is attributed to the harness anyway and the rule under test never
+        # runs — which is why the first version of this passed with the rule
+        # removed.
+        two_user = {"model": "qwen", "messages": [
+            {"role": "system", "content": "# Tone\nbe terse"},
+            {"role": "user", "content": "harness preamble line"},
+            {"role": "user", "content": "the person's words"}]}
+        rows = self.rows(self.console(reqs={"k1": two_user}))
+        i = next(i for i, l in enumerate(rows) if "harness preamble" in l)
+        head = [l for l in rows[:i] if l.strip()][-1]
+        self.assertNotRegex(head.strip(), r"^you\b",
+                            f"the harness's own preamble is reported as "
+                            f"yours: {head!r}")
+
     def test_a_turn_already_shown_is_not_drawn_again(self):
         """A title generator quotes the conversation back, so its final turn
         is the user's own earlier message. Taking the LAST turn replayed
@@ -3849,3 +3893,133 @@ class EmojiWidthFollowsUnicode(TapTest):
 
     def test_ascii_is_unaffected(self):
         self.assertEqual(self.C.dwidth("plain ascii"), len("plain ascii"))
+
+
+class RailSectionsAreGrouped(TapTest):
+    """A section heading carries a rule, so its numbers read as belonging to
+    it rather than as one long column of figures with bold words in it."""
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def rail(self, cols=140):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, cols)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(i) for i in range(3)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "right"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.inflight_reqs = {}
+        c.msg = ""; c.msg_until = 0; c.tick = 0; c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        w = c.rail_w()
+        return w, ["".join(x for x, _ in t) if isinstance(t, list) else t
+                   for t, _a in c.dash(w)]
+
+    def test_each_heading_has_a_rule(self):
+        _w, rows = self.rail()
+        heads = [r for r in rows if r.startswith(("This turn", "Session"))]
+        self.assertTrue(heads, "no section headings at all")
+        for h in heads:
+            with self.subTest(h=h):
+                self.assertIn("─", h, f"no rule on the heading: {h!r}")
+
+    def test_the_rule_never_overflows_the_rail(self):
+        for cols in (90, 118, 140, 200):
+            with self.subTest(cols=cols):
+                w, rows = self.rail(cols)
+                for r in rows:
+                    self.assertLessEqual(self.C.dwidth(r), w,
+                                         f"row wider than the rail: {r!r}")
+
+    def test_the_numbers_are_not_ruled(self):
+        """Only headings. A rule on a value row would read as a separator in
+        the middle of a group."""
+        _w, rows = self.rail()
+        for r in rows:
+            if r.startswith(("This turn", "Session", "Model")):
+                continue
+            with self.subTest(r=r):
+                self.assertNotIn("─", r, f"a value row carries a rule: {r!r}")
+
+    def test_each_party_carries_a_filter_mark(self):
+        """The state is in the MARK, not only in the dimness — a
+        low-contrast theme loses a dimmed colour entirely."""
+        C = self.C
+        rows, cols = 40, 140
+        cells = [[" "] * cols for _ in range(rows)]
+
+        class Screen:
+            def getmaxyx(self):
+                return (rows, cols)
+
+            def erase(self):
+                for r in cells:
+                    r[:] = [" "] * cols
+
+            def refresh(self):
+                pass
+
+            def addnstr(self, y, x, text, n, attr=0):
+                for ch in text[:max(0, n)]:
+                    if x >= cols:
+                        return
+                    cells[y][x] = ch
+                    x += 1
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(0)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = {"you"}; c.chips = []
+        c.inflight = []; c.inflight_reqs = {}
+        c.msg = ""; c.msg_until = 0; c.tick = 0; c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild(); c.draw()
+        head = "".join(cells[0])
+        self.assertIn(C.FILTER_LABEL, head)
+        self.assertEqual(head.count(C.FILTER_ON), 1,
+                         f"exactly one party is showing: {head!r}")
+        self.assertEqual(head.count(C.FILTER_OFF), len(C.PARTIES) - 1,
+                         f"the rest should be marked off: {head!r}")
+
+    def test_the_mark_is_inside_the_click_target(self):
+        """It is the affordance, so clicking it must do what it advertises."""
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(0)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.inflight_reqs = {}
+        c.msg = ""; c.msg_until = 0; c.tick = 0; c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        for party, _label, x0, _x1 in c.chips:
+            with self.subTest(party=party):
+                self.assertEqual(c.chip_at(x0), party,
+                                 "the mark is outside the click target")
