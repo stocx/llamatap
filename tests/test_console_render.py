@@ -4437,28 +4437,29 @@ class BothPlacementsAgree(TapTest):
         self.assertIn("90%", col3, f"1,800 of 2,000 reused is 90%: {col3}")
         self.assertNotIn("2,063", col3, "divided by the evaluated tokens")
 
-    def test_the_thinking_share_appears_when_the_model_thought(self):
-        """A thread whose window is 40% reasoning it has finished with is a
-        different thing from one that is 40% code."""
+    def test_the_thinking_share_uses_reasoning_in_the_latest_request(self):
+        """The numerator and prompt-token denominator describe one request."""
         C = self.C
-        rec = a_record(0)
-        rec["resp"] = json.dumps({
+        earlier = a_record(0)
+        earlier["resp"] = json.dumps({
             "choices": [{"message": {"content": "done",
-                                     "reasoning_content": "weighing " * 200},
-                         "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 4000, "completion_tokens": 400},
-            "timings": {"prompt_n": 10, "predicted_n": 400,
-                        "prompt_ms": 50.0, "predicted_ms": 900.0,
-                        "prompt_per_second": 200.0,
-                        "predicted_per_second": 83.3, "cache_n": 3000}})
-        rec["meta"]["usage"] = {"prompt_tokens": 4000, "completion_tokens": 400}
+                                     "reasoning_content": "a" * 800}}]})
+        latest = a_record(1)
+        latest["req"]["messages"].append({
+            "role": "assistant", "content": "previous answer",
+            "reasoning_content": "b" * 400})
+        latest["resp"] = json.dumps({
+            "choices": [{"message": {"content": "done",
+                                     "reasoning_content": "c" * 1200}}]})
+        latest["meta"]["usage"] = {"prompt_tokens": 1000,
+                                    "completion_tokens": 5}
 
         class Screen:
             def getmaxyx(self):
                 return (50, 170)
 
         c = C.Console.__new__(C.Console)
-        c.scr = Screen(); c.recs = [rec]
+        c.scr = Screen(); c.recs = [earlier, latest]
         c.name = None; c.extra = []; c.follow = False; c.top = 0
         c.opts = {"rawjson": False, "preamble": False, "flags": False,
                   "repeats": False, "fold_thinking": True, "stats": "bottom"}
@@ -4474,8 +4475,55 @@ class BothPlacementsAgree(TapTest):
                          for t, _a in c.dash(168))
         col3 = self.columns(text)[3]
         self.assertIn("Thinking", col3, "no thinking share at all")
-        self.assertRegex(col3, r"\d+ / [\d,]+ tokens",
-                         "the share is stated without its basis")
+        self.assertIn("100 / 1,000 tokens", col3,
+                      f"the session used response-history reasoning: {col3}")
+        self.assertIn("10%", col3,
+                      f"the reasoning from this request is not 10%: {col3}")
+
+    def test_thinking_absent_from_latest_context_counts_as_zero(self):
+        """Older and just-generated thoughts are not in this prompt's context."""
+        C = self.C
+        earlier = a_record(0)
+        earlier["resp"] = json.dumps({
+            "choices": [{"message": {"reasoning_content": "a" * 800}}]})
+        latest = a_record(1)
+        latest["meta"]["usage"] = {"prompt_tokens": 1000,
+                                    "completion_tokens": 5}
+        latest["resp"] = json.dumps({
+            "choices": [{"message": {"content": "done",
+                                     "reasoning_content": "c" * 1200}}]})
+
+        class Screen:
+            def getmaxyx(self):
+                return (50, 170)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [earlier, latest]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "bottom"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.inflight_reqs = {}
+        c.msg = ""; c.msg_until = 0; c.tick = 0; c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        text = "\n".join("".join(x for x, _ in t) if isinstance(t, list) else t
+                         for t, _a in c.dash(168))
+        col3 = self.columns(text)[3]
+        self.assertIn("0 / 1,000 tokens", col3, f"got: {col3}")
+        self.assertIn("0%", col3, f"got: {col3}")
+
+    def test_thinking_is_counted_in_responses_and_anthropic_inputs(self):
+        C = self.C
+        self.assertEqual(C.context_thinking_tokens({"input": [
+            {"type": "reasoning", "summary": [
+                {"type": "summary_text", "text": "r" * 400}]}]}), 100)
+        self.assertEqual(C.context_thinking_tokens({"messages": [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "t" * 200}]}]}), 50)
 
     def test_the_thinking_row_exists_before_there_is_any(self):
         """The panel is a fixed SKELETON: every section and every row exists

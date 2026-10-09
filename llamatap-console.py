@@ -88,6 +88,50 @@ def replay_cmd(args, path):
 
 def cat_markers():
     return CAT.CONTENT_MARKERS
+
+
+def context_thinking_tokens(req):
+    """Estimate reasoning tokens carried in this request's conversation.
+
+    The Session dashboard compares this with this same request's prompt-token
+    count. Counting parsed thoughts from older responses mixed a cumulative
+    numerator with a single-request denominator, and was wrong when a harness
+    stripped reasoning before resending history.
+    """
+    if not isinstance(req, dict):
+        return 0
+    msgs = req.get("messages") or req.get("input")
+    if not isinstance(msgs, list):
+        return 0
+    chars = 0
+    for msg in msgs:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("type") == "reasoning":
+            summary = msg.get("summary") or []
+            if isinstance(summary, str):
+                chars += len(summary)
+            elif isinstance(summary, list):
+                chars += sum(len(block["text"]) for block in summary
+                             if isinstance(block, dict) and
+                             isinstance(block.get("text"), str))
+            continue
+        if msg.get("role") != "assistant":
+            continue
+        reasoning = msg.get("reasoning_content")
+        if isinstance(reasoning, str):
+            chars += len(reasoning)
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") in (
+                        "thinking", "reasoning"):
+                    value = block.get("thinking") or block.get("text") or ""
+                    if isinstance(value, str):
+                        chars += len(value)
+    return chars // 4
+
+
 # Default locations. Nothing here may name a particular machine or a
 # particular person's home directory: this has to work for whoever clones it.
 # The dispatcher exports all of these, so these defaults only apply when a
@@ -1660,11 +1704,6 @@ class Console:
         # Everything the completed thread has already shown, so an in-flight
         # request only draws what is actually new.
         already = {(m.get("text") or "").strip() for m in msgs}
-        # Thinking tokens across the thread, for the dashboard's share-of-
-        # context row. Counted here because this is where the parsed thread
-        # is, and once per rebuild rather than once per draw.
-        self._think_tok = sum((m.get("tokens") or (m.get("chars", 0) // 4))
-                              for m in msgs if m.get("kind") == "thinking")
         # The system prompt of the most recent COMPLETED request, for the
         # side-call test used on in-flight turns below.
         last_pre = None
@@ -2037,11 +2076,9 @@ class Console:
         # finished with is a different thing from one that is 40% code, and
         # nothing else on screen distinguishes them.
         #
-        # Measured during rebuild, where the parsed thread exists. `msgs_`
-        # here is the raw request message list — role/content dicts with no
-        # `kind` — so summing over it matched nothing and the row never
-        # appeared.
-        think_tok = getattr(self, "_think_tok", 0)
+        # Both values describe the same request: its prompt-token count and
+        # reasoning already present in its submitted message history.
+        think_tok = context_thinking_tokens(req)
         # The thinking LEVEL, when a harness asks for one. No harness seen so
         # far sends any of these, so it shows only when one starts to.
         level = None

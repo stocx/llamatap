@@ -28,6 +28,7 @@ import json
 import os
 import threading
 import time
+import types
 import unittest
 
 from _support import (CHAT_OK, TRUNCATED_ERROR, MockUpstream, RawUpstream,
@@ -169,6 +170,70 @@ class Streaming(TapTest):
         for i in range(50):
             self.assertIn(f"t{i}", body, f"event t{i} was lost")
         self.assertIn("[DONE]", body)
+
+    def test_interleaved_tool_call_fragments_stay_with_their_index(self):
+        """Drive interleaved SSE through the proxy and inspect live publishes."""
+        def event(ix, name=None, args=None):
+            fn = {}
+            if name is not None:
+                fn["name"] = name
+            if args is not None:
+                fn["arguments"] = args
+            data = {"choices": [{"delta": {"tool_calls": [
+                {"index": ix, "function": fn}]}}]}
+            return b"data: " + json.dumps(data).encode() + b"\n\n"
+
+        chunks = [
+            event(0, "write", '{"path":'),
+            event(1, "read", '{"path":"b.py"}'),
+            event(0, args='"a.py"}'),
+            b'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+        routes = {"/v1/chat/completions": {
+            "status": 200,
+            "headers": {"Content-Type": "text/event-stream"},
+            "chunks": chunks, "chunked": True}}
+        with MockUpstream(routes) as up, ProxyHarness(up.url) as tap:
+            published = []
+            original_set = tap.mod.inflight_set
+
+            def capture(key, **kw):
+                if "tool" in kw:
+                    published.append(dict(kw))
+                return original_set(key, **kw)
+
+            # The proxy throttles disk publishes to 300 ms. Advance only its
+            # clock so every streamed event produces an observable snapshot;
+            # the mock server and the test keep using wall-clock time.
+            clock = [0.0]
+            real_time = tap.mod.time
+
+            def step_time():
+                clock[0] += 1.0
+                return clock[0]
+
+            tap.mod.inflight_set = capture
+            tap.mod.time = types.SimpleNamespace(time=step_time,
+                                                 strftime=real_time.strftime)
+            try:
+                c = tap.conn()
+                c.request("POST", "/v1/chat/completions", BODY,
+                          {"Content-Type": "application/json"})
+                body = c.getresponse().read()
+                c.close()
+                self.assertIn(b"[DONE]", body)
+                tap.wait_records(1)
+            finally:
+                tap.mod.inflight_set = original_set
+                tap.mod.time = real_time
+
+        self.assertTrue(published, "the proxy published no streamed tool call")
+        final_call = published[-1]
+        self.assertEqual(final_call.get("tool"), "write")
+        self.assertEqual(final_call.get("args"), '{"path":"a.py"}',
+                         f"index 1 arguments leaked into index 0: {final_call}")
+        self.assertEqual(final_call.get("tools_n"), 2)
 
 
 class Lifecycle(TapTest):
