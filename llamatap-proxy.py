@@ -572,7 +572,7 @@ class Tap(http.server.BaseHTTPRequestHandler):
             # the newest turn is invisible for as long as it takes to generate —
             # twenty seconds of nothing on a long reasoning reply.
             live_txt, live_think, sse_buf = "", "", ""
-            live_tool, live_args = "", ""
+            live_calls, live_ix = {}, 0
             while True:
                 # read1, not read. BufferedReader.read(n) blocks until it
                 # has n bytes or hits EOF, so with small SSE events the proxy
@@ -615,18 +615,33 @@ class Tap(http.server.BaseHTTPRequestHandler):
                         # console sat silent while the harness showed the
                         # code arriving, because the only two fields being
                         # watched stay empty for the entire call.
+                        # Keyed by INDEX. A model can stream several tool
+                        # calls at once and their fragments interleave; a
+                        # single name and a single argument buffer took
+                        # whichever name arrived last and concatenated every
+                        # call's arguments into it, so one call was shown
+                        # with another's body. 5% of the tool-calling turns
+                        # in the recordings to hand are parallel.
                         for tc in (dl.get("tool_calls") or []):
                             fn = tc.get("function") or {}
+                            ix = tc.get("index", 0)
+                            call = live_calls.setdefault(ix, {"name": "",
+                                                              "args": ""})
                             if fn.get("name"):
-                                live_tool = fn["name"]
+                                call["name"] = fn["name"]
                             if fn.get("arguments"):
-                                live_args += fn["arguments"]
+                                call["args"] += fn["arguments"]
+                                # The one being written is the one to show.
+                                live_ix = ix
                 if time.time() - last_pub > 0.3:
                     last_pub = time.time()
+                    cur = live_calls.get(live_ix) or {}
                     inflight_set(key, tokens=ntok, state="decoding",
                                  text=live_txt[-1200:],
                                  thinking=live_think[-1200:],
-                                 tool=live_tool, args=live_args[-1200:])
+                                 tool=cur.get("name", ""),
+                                 args=(cur.get("args") or "")[-1200:],
+                                 tools_n=len(live_calls))
                 if len(seen) < HEAD_CAP:
                     seen.extend(chunk)
                 else:

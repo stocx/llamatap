@@ -1497,12 +1497,18 @@ class Console:
                 pc = m.get("preamble_chars", 0)
                 total = max(1, m.get("chars", 1))
                 if pc:
-                    self.emit_node(m["rec"], rec, h, "preamble", "system prompt",
-                                   "system prompt",
-                                   f"{pc:,} chars · ~{pc//4:,} tokens · "
-                                   f"{100*pc//total}% of the request", 1, False,
-                                   base=body_col)
-                    secs_ = m.get("sections") or []
+                    pre_nid = self.emit_node(
+                        m["rec"], rec, h, "preamble", "system prompt",
+                        "system prompt",
+                        f"{pc:,} chars · ~{pc//4:,} tokens · "
+                        f"{100*pc//total}% of the request", 1, False,
+                        base=body_col)
+                    # Only when the prompt is open. The tool list was already
+                    # guarded this way; the sections were not, so `/preamble`
+                    # said "collapsed" and left its own headings on screen —
+                    # the same contradiction, one level down.
+                    secs_ = (m.get("sections") or []) \
+                        if pre_nid in self.open else []
                     pre_text = h["preamble"]
                     for k, sec in enumerate(secs_):
                         key = f"{sec['label']}@{sec['offset']}"
@@ -1796,8 +1802,10 @@ class Console:
             # every frame until the last.
             targs, tname = job.get("args") or "", job.get("tool") or ""
             if targs:
+                n_ = job.get("tools_n") or 1
+                more = f"  ({n_} in parallel)" if n_ > 1 else ""
                 self.emit(f"\033[33m{' ' * LEFT}{mdl} → tool call "
-                          f"[{tname or '…'}] {sp}{C_OFF}")
+                          f"[{tname or '…'}]{more} {sp}{C_OFF}")
                 self.block(targs, "\033[33m", LEFT, max(24, W2 - 2),
                            text_col=C_BODY)
                 self.emit("")
@@ -2718,6 +2726,23 @@ class Console:
     # lingered after the click that dismissed it, then a colour that could
     # never appear because the terminal was not reporting motion at all.
 
+    def mark(self, nids, open_):
+        """Open or close nodes BY HAND, recording that a person decided.
+
+        Nodes are open by default, and `rebuild()` re-opens any node not in
+        `touched`. A command that only removed ids from `open` therefore
+        reported success and then watched the content come back on the next
+        poll — `/preamble` and `/repeats close` both did exactly that. Every
+        deliberate change goes through here so the two sets cannot drift
+        apart again.
+        """
+        for nid in list(nids):
+            if open_:
+                self.open.add(nid)
+            else:
+                self.open.discard(nid)
+            self.touched.add(nid)
+
     def toggle(self, nid):
         if nid in self.open:
             self.open.discard(nid)
@@ -2810,17 +2835,18 @@ class Console:
                 self.rebuild()
                 for (_l, _c0, _c1, nid) in self.hotspots:
                     if nid[1] == "repeat":
-                        self.open.add(nid)
+                        self.mark([nid], True)
                 self.rebuild()
                 self.note("every re-sent message expanded")
             elif arg in ("close", "none", "collapse"):
-                self.open = {n for n in self.open if n[1] != "repeat"}
+                self.mark([n for n in self.open if n[1] == "repeat"], False)
                 self.rebuild()
                 self.note("re-sent messages collapsed")
             else:
                 self.opts["repeats"] = not self.opts.get("repeats", False)
                 if not self.opts["repeats"]:
-                    self.open = {n for n in self.open if n[1] != "repeat"}
+                    self.mark([n for n in self.open if n[1] == "repeat"],
+                              False)
                 self.rebuild()
         elif c in ("stats", "panel", "rail"):
             arg = (args[0].lower() if args else "")
@@ -2872,12 +2898,10 @@ class Console:
             if not pre:
                 return self.note("no system prompt in this recording")
             if all(n in self.open for n in pre):
-                for n in pre:
-                    self.open.discard(n)
+                self.mark(pre, False)
                 self.note("system prompt collapsed")
             else:
-                for n in pre:
-                    self.open.add(n)
+                self.mark(pre, True)
                 self.note(f"system prompt expanded ({len(pre)} request(s))")
             self.rebuild()
         elif c in ("raw", "json"):

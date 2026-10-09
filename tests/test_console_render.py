@@ -4620,3 +4620,171 @@ class ShorterStatLabels(TapTest):
         text = self.panel()
         self.assertIn("KV cache hits", text)
         self.assertNotIn("reused,", text, "the raw counts are still there")
+
+
+class CommandsRecordIntent(TapTest):
+    """A command that collapses something must make it STAY collapsed.
+
+    Nodes are open by default and `rebuild()` re-opens any node not in
+    `touched`, so a command that only removed ids from `open` reported
+    success and then watched the content come back on the next poll. Found by
+    review, not by the 424 tests that existed — the default-open behaviour
+    and its tests went in together, and only the path I was thinking about
+    was covered.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.C = load("console")
+
+    def console(self, recs=None):
+        C = self.C
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen()
+        c.recs = recs if recs is not None else [a_record(i) for i in range(2)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c._rail_h = {}
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = []; c.inflight_reqs = {}
+        c.msg = ""; c.msg_until = 0; c.tick = 0; c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        return c
+
+    def test_preamble_collapse_survives_a_rebuild(self):
+        c = self.console()
+        c.run_cmd("preamble")
+        self.assertEqual([n for n in c.open if n[1] == "preamble"], [],
+                         "the system prompt reopened itself")
+        c.rebuild()
+        self.assertEqual([n for n in c.open if n[1] == "preamble"], [],
+                         "it reopened on the next rebuild")
+
+    def test_preamble_collapse_hides_its_sections(self):
+        """`/preamble` said "collapsed" and left its own headings on screen —
+        the same contradiction, one level down. The tool list was already
+        guarded this way; the sections were not."""
+        c = self.console()
+        before = {nid[1] for (_l, _a, _b, nid) in c.hotspots}
+        self.assertIn("section", before, "the fixture has no sections")
+        c.run_cmd("preamble")
+        after = {nid[1] for (_l, _a, _b, nid) in c.hotspots}
+        self.assertNotIn("section", after,
+                         "sections outlived the prompt they belong to")
+
+    def test_preamble_expands_again(self):
+        c = self.console()
+        c.run_cmd("preamble")
+        c.run_cmd("preamble")
+        self.assertTrue([n for n in c.open if n[1] == "preamble"],
+                        "it would not reopen")
+
+    def test_repeats_close_survives_a_rebuild(self):
+        c = self.console()
+        c.run_cmd("repeats open")
+        c.run_cmd("repeats close")
+        c.rebuild()
+        self.assertEqual([n for n in c.open if n[1] == "repeat"], [],
+                         "re-sent messages reopened themselves")
+
+    def test_every_deliberate_change_is_recorded(self):
+        """The asymmetry that caused this: five sites change node state and
+        only the commands forgot to say a person had decided."""
+        src = open(os.path.join(ROOT, "llamatap-console.py")).read()
+        body = src[src.index("def run_cmd"):]
+        self.assertNotIn("self.open.discard", body,
+                         "a command changes `open` without going through "
+                         "mark(), so the default will undo it")
+        self.assertNotIn("self.open = {", body,
+                         "a command rebuilds `open` without recording intent")
+
+
+class ParallelToolCallsDoNotMerge(TapTest):
+    """A model can stream several tool calls at once and their fragments
+    interleave. A single name and a single argument buffer took whichever
+    name arrived last and concatenated every call's arguments into it, so one
+    call was shown with another's body.
+
+    5% of the tool-calling turns in the recordings to hand are parallel, so
+    this is not hypothetical — but it affects the LIVE view only: the
+    completed record is parsed from the whole response independently, so
+    nothing recorded is wrong.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.P = load("proxy")
+
+    def test_the_proxy_keys_calls_by_index(self):
+        src = open(os.path.join(ROOT, "llamatap-proxy.py")).read()
+        i = src.index('for tc in (dl.get("tool_calls") or []):')
+        window = src[i:i + 700]
+        self.assertIn('tc.get("index"', window,
+                      "tool-call fragments are still merged across calls")
+
+    def test_the_console_says_when_calls_are_parallel(self):
+        C = load("console")
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(0)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c._rail_h = {}
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = [{"key": "k", "model": "qwen", "state": "decoding",
+                       "req_bytes": 10, "tool": "write",
+                       "args": '{"path":"a.py"', "tools_n": 2}]
+        c.inflight_reqs = {}
+        c.msg = ""; c.msg_until = 0; c.tick = 0; c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        rows = ["".join(ch for _, ch, _ in s) for s in c.lines]
+        row = next(l for l in rows if "tool call" in l)
+        self.assertIn("2 in parallel", row,
+                      f"a parallel call renders as a lone one: {row!r}")
+
+    def test_a_single_call_says_nothing_extra(self):
+        C = load("console")
+
+        class Screen:
+            def getmaxyx(self):
+                return (40, 140)
+
+        c = C.Console.__new__(C.Console)
+        c.scr = Screen(); c.recs = [a_record(0)]
+        c.name = None; c.extra = []; c.follow = False; c.top = 0
+        c._rail_h = {}
+        c.opts = {"rawjson": False, "preamble": False, "flags": False,
+                  "repeats": False, "fold_thinking": True, "stats": "off"}
+        c.open = set(); c.touched = set(); c.hotspots = []; c.starts = []
+        c.menu = []; c.detail = None; c.node_bodies = {}
+        c.show = set(C.PARTIES); c.chips = []
+        c.inflight = [{"key": "k", "model": "qwen", "state": "decoding",
+                       "req_bytes": 10, "tool": "write",
+                       "args": '{"path":"a.py"', "tools_n": 1}]
+        c.inflight_reqs = {}
+        c.msg = ""; c.msg_until = 0; c.tick = 0; c.cmd = None; c.busy = ""
+        c._flags = ""; c._flags_started = True; c._flags_err = ""
+        c._flags_src = "running"; c._flags_age = None; c._rec_name = {}
+        c.rebuild()
+        rows = ["".join(ch for _, ch, _ in s) for s in c.lines]
+        row = next(l for l in rows if "tool call" in l)
+        self.assertNotIn("parallel", row, f"got: {row!r}")
