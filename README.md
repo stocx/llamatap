@@ -43,7 +43,7 @@ without them.
 ## Install
 
 ```bash
-git clone <this repo> ~/GIT/llamatap
+git clone https://github.com/stocx/llamatap.git ~/GIT/llamatap
 ln -s ~/GIT/llamatap/llamatap ~/.local/bin/llamatap
 ```
 
@@ -99,6 +99,8 @@ in the reader until those formats are implemented. The shape is the harness's
 choice, not the model's — a local llama-server answers all three.
 
 ## Use
+
+For colleague onboarding, download the [Word handout](docs/user-guide.docx) or read the [Markdown User Guide](docs/user-guide.md). Both cover installation, llama-server setup, harness configuration, console keys, and slash commands.
 
 Two windows. In the first:
 
@@ -172,19 +174,6 @@ Recordings contain your prompts, your file contents and your paths.
   compatibility shim rewrote the outgoing request, `meta.shims` says so.
 
 If you share a recording, read it first.
-
-## Tests
-
-Standard library only, no runner to install:
-
-```bash
-python3 -m unittest discover -s tests -v
-```
-
-Every test runs in its own temporary directory against a mock upstream bound
-to an ephemeral port. Nothing touches a real recording, needs a key, or
-reaches the network. Streaming is asserted by ordering rather than elapsed
-time, so the suite does not get flakier on a loaded machine.
 
 ## Reference
 
